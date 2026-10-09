@@ -18,8 +18,11 @@
 -- The ship hovers on its own: whenever no up/down key is held (in the
 -- menus too) it holds its height. Setup from the menus is saved in
 -- ship.cfg.
+--
+-- Everything that happens is written to ship.log (the previous run is kept
+-- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -73,6 +76,46 @@ for _, name in ipairs(peripheral.getNames()) do
   if t == "redstone_relay" then relays[#relays + 1] = name end
 end
 table.sort(relays)
+
+-- Velocity Sensors (Create Simulated): speed along the way they face.
+local velSensors = {}
+for _, name in ipairs(peripheral.getNames()) do
+  if peripheral.getType(name) == "velocity_sensor" then
+    local p = peripheral.wrap(name)
+    local ok, axis = pcall(p.getAxis)
+    velSensors[#velSensors + 1] = { name = name, p = p, axis = ok and axis or "?" }
+  end
+end
+local lastVel = {}
+local function readVelocity()
+  for i, v in ipairs(velSensors) do
+    local ok, val = pcall(v.p.getVelocity)
+    lastVel[i] = ok and val or nil
+  end
+end
+local function velText()
+  local parts = {}
+  for i, v in ipairs(velSensors) do
+    parts[#parts + 1] = string.format("%s=%s", v.axis, lastVel[i] and string.format("%.2f", lastVel[i]) or "?")
+  end
+  return #parts > 0 and table.concat(parts, " ") or "-"
+end
+
+-- ---------- log ----------
+local LOG_FILE, LOG_LIMIT = "ship.log", 400000
+local logFile, logBytes, logFull = nil, 0, false
+local logStart = now()
+local function log(fmt, ...)
+  if not logFile or logFull then return end
+  local line = string.format("%8.2f ", now() - logStart) .. string.format(fmt, ...)
+  logBytes = logBytes + #line + 1
+  if logBytes > LOG_LIMIT then
+    logFull = true
+    line = "log full, stopped writing"
+  end
+  logFile.writeLine(line)
+  logFile.flush()
+end
 
 -- ---------- saved setup ----------
 
@@ -139,8 +182,10 @@ local function setOutput(o, on)
   local ok, err = pcall(peripheral.call, o.relay, "setOutput", o.side, on)
   if ok then
     outState[key] = on
+    log("relay %s %s -> %s", o.relay, o.side, on and "ON" or "off")
   else
     relayError = string.format("%s %s: %s", o.relay, o.side, tostring(err))
+    log("relay %s %s -> %s FAILED: %s", o.relay, o.side, on and "ON" or "off", tostring(err))
   end
 end
 
@@ -152,6 +197,7 @@ end
 
 local currentMove = nil
 local function applyMove(move)
+  if move ~= currentMove then log("move: %s", move or "none") end
   currentMove = move
   local on = {}
   for _, o in ipairs(move and cfg.moves[move] or {}) do on[o.relay .. ":" .. o.side] = true end
@@ -169,9 +215,16 @@ local function describe(list)
 end
 
 local thrust = 0
+local sentThrust = nil
 local function setThrusters(power)
   local p = math.floor(clamp(power, 0, 15) + 0.5)
-  for _, t in ipairs(thrusters) do pcall(t.setPower, p) end
+  -- Spooling up/down is in the samples; log only reaching off or full.
+  if p ~= sentThrust and (p == 0 or p == math.floor(FORWARD_POWER + 0.5)) then log("thrusters -> %d", p) end
+  sentThrust = p
+  for i, t in ipairs(thrusters) do
+    local ok, err = pcall(t.setPower, p)
+    if not ok then log("thruster %d setPower FAILED: %s", i, tostring(err)) end
+  end
 end
 
 local shift = 0
@@ -181,7 +234,8 @@ local function setShift(v)
   local s = math.floor(shift + 0.5)
   if transmission and s ~= sentShift then
     sentShift = s
-    pcall(transmission.setShiftLevel, s)
+    local ok, err = pcall(transmission.setShiftLevel, s)
+    if not ok then log("transmission setShiftLevel(%d) FAILED: %s", s, tostring(err)) end
   end
 end
 
@@ -189,13 +243,27 @@ end
 
 local twHeld = {}     -- keys held on the typewriter right now
 local twSeen = {}     -- code -> when the typewriter last had it held
+local lastHeldText, twError = nil, nil
 local function pollTypewriter()
-  twHeld = {}
-  if not typewriter then return end
-  local ok, codes = pcall(typewriter.getPressedKeyCodes)
-  if ok and type(codes) == "table" then
-    local t = now()
-    for _, c in ipairs(codes) do twHeld[c], twSeen[c] = true, t end
+  local held = {}
+  if typewriter then
+    local ok, codes = pcall(typewriter.getPressedKeyCodes)
+    if ok and type(codes) == "table" then
+      local t = now()
+      for _, c in ipairs(codes) do held[c], twSeen[c] = true, t end
+    elseif not ok and tostring(codes) ~= twError then
+      twError = tostring(codes)
+      log("typewriter getPressedKeyCodes FAILED: %s", twError)
+    end
+  end
+  twHeld = held
+  local names = {}
+  for c in pairs(held) do names[#names + 1] = (keys.getName(c) or "?") .. "(" .. c .. ")" end
+  table.sort(names)
+  local text = #names > 0 and table.concat(names, " ") or "-"
+  if text ~= lastHeldText then
+    lastHeldText = text
+    log("typewriter keys: %s", text)
   end
 end
 
@@ -219,11 +287,13 @@ end
 
 local onSable = sublevel ~= nil and sublevel.isInPlotGrid()
 local alt, vy, lastAltT = nil, 0, nil
+local posX, posZ = nil, nil
 local function readHeight()
   if not onSable then return end
   local ok, pose = pcall(sublevel.getLogicalPose)
   if not ok or not pose then return end
   local y, t = pose.position.y, now()
+  posX, posZ = pose.position.x, pose.position.z
   if alt and lastAltT and t > lastAltT then
     vy = vy * 0.5 + (y - alt) / (t - lastAltT) * 0.5
   end
@@ -248,6 +318,7 @@ local function liftStep(dt)
     lift.mode = "fly"
     lift.hover = math.max(shift, cfg.hover or 0)
     lift.holdAlt = nil
+    log("lift: take off, starting at hover %d", math.floor(lift.hover + 0.5))
   end
   if holdingHeight() then
     local want = ud * CLIMB_SPEED
@@ -262,6 +333,7 @@ local function liftStep(dt)
       lift.landedSince = lift.landedSince or now()
       if now() - lift.landedSince > 1.5 then
         lift.mode, lift.status, lift.landedSince = "off", "landed", nil
+        log("lift: landed, lift off")
         setShift(0)
         return
       end
@@ -279,6 +351,7 @@ local function liftStep(dt)
         if not cfg.hover or math.abs(cfg.hover - lift.hover) > 2 then
           cfg.hover = math.floor(lift.hover + 0.5)
           saveConfig()
+          log("lift: hover level learned %d", cfg.hover)
         end
       end
     else
@@ -309,7 +382,12 @@ end
 
 -- ---------- screens ----------
 
+local currentScreen = nil
 local function screen(title)
+  if title ~= currentScreen then
+    currentScreen = title
+    log("screen: %s", title)
+  end
   term.clear()
   term.setCursorPos(1, 1)
   print("Ship Pilot v" .. VERSION .. " - " .. title)
@@ -320,7 +398,10 @@ local function waitChar(allowed)
   while true do
     local _, ch = os.pullEvent("char")
     ch = ch:lower()
-    if not allowed or allowed:find(ch, 1, true) then return ch end
+    if not allowed or allowed:find(ch, 1, true) then
+      log("computer key: %s", ch)
+      return ch
+    end
   end
 end
 
@@ -366,6 +447,7 @@ local function flyScreen()
       print("Move:   " .. (currentMove or "-") .. (currentMove and (" (" .. describe(cfg.moves[currentMove]) .. ")") or ""))
       if relayError then print("Relay error: " .. relayError) end
       print(liftLine())
+      if #velSensors > 0 then print("Speed sensor: " .. velText()) end
       print("")
       print("Press Q on the computer for the menu.")
       print("The ship keeps hovering there.")
@@ -405,6 +487,7 @@ local function typewriterTest()
     local ev, a = os.pullEvent()
     if ev == "key" then
       lastKey = { code = a, from = fromTypewriter(a) and "typewriter" or "computer keyboard" }
+      log("key event %s (%d) from %s", keyName(a), a, lastKey.from)
     elseif ev == "char" and a:lower() == "q" then
       return
     end
@@ -493,8 +576,10 @@ local function gearshiftSetup()
     elseif ch == "l" or ch == "r" or ch == "b" then
       local cur = {}
       for i, o in ipairs(list) do if on[i] then cur[#cur + 1] = { relay = o.relay, side = o.side } end end
-      cfg.moves[ch == "l" and "left" or ch == "r" and "right" or "back"] = cur
+      local id = ch == "l" and "left" or ch == "r" and "right" or "back"
+      cfg.moves[id] = cur
       saveConfig()
+      log("gearshift setup: saved %s = %s", id, describe(cur))
     elseif ch == "c" then
       on = {}
       allRelaysOff()
@@ -533,6 +618,7 @@ local function hoverCalibration()
       if steady >= 5 then
         cfg.hover = math.floor(lift.hover + 0.5)
         saveConfig()
+        log("hover calibration: saved %d", cfg.hover)
         screen("Hover calibration")
         print(string.format("Hover level saved: %d/256", cfg.hover))
         pause()
@@ -540,6 +626,7 @@ local function hoverCalibration()
       end
       if t - started > 90 then
         screen("Hover calibration")
+        log("hover calibration: didn't settle (alt %.2f target %.2f vy %.2f shift %d)", alt, target, vy, shift)
         print("It didn't settle in 90 seconds.")
         print("Nothing was changed.")
         pause()
@@ -649,6 +736,7 @@ end
 
 local function setTune(t, v)
   v = clamp(v, t.min, t.max)
+  log("tuning: %s = %s", t.name, tostring(v))
   if t.name == "hover" then
     cfg.hover = math.floor(v + 0.5)
     if lift.mode == "fly" then lift.hover = cfg.hover end
@@ -730,16 +818,51 @@ if transmission then
   if shift > 0 then lift.mode, lift.hover = "fly", shift end
 end
 
+-- A line of numbers 5 times a second while flying, once a second otherwise.
+local function sampleLoop()
+  while true do
+    readVelocity()
+    local held = {}
+    for _, act in ipairs(ACTIONS) do if down(act.id) then held[#held + 1] = act.id end end
+    log("S %-6s keys=%s thrust=%d move=%s lift=%s %d/256 hover=%s y=%s vy=%+.2f vel=%s pos=%s",
+      currentScreen or "-", #held > 0 and table.concat(held, "+") or "-", math.floor(thrust + 0.5),
+      currentMove or "-", lift.mode, math.floor(shift + 0.5), lift.hover and tostring(math.floor(lift.hover + 0.5)) or "-",
+      alt and string.format("%.2f", alt) or "-", vy, velText(),
+      posX and string.format("%.1f,%.1f", posX, posZ) or "-")
+    sleep(currentScreen == "Fly" and 0.2 or 1)
+  end
+end
+
 local function ui()
   if args[1] == "fly" then flyScreen() end
   menu()
 end
 
-local ok, err = pcall(parallel.waitForAny, liftLoop, ui)
+-- Start the log (keeping the previous run as ship.log.old).
+if fs.exists(LOG_FILE) then
+  if fs.exists(LOG_FILE .. ".old") then fs.delete(LOG_FILE .. ".old") end
+  fs.move(LOG_FILE, LOG_FILE .. ".old")
+end
+logFile = fs.open(LOG_FILE, "w")
+log("Ship Pilot v%s", VERSION)
+for _, name in ipairs(peripheral.getNames()) do log("peripheral %s: %s", name, tostring(peripheral.getType(name))) end
+for _, v in ipairs(velSensors) do log("velocity sensor %s axis %s", v.name, tostring(v.axis)) end
+log("Sable: %s  transmission start level: %d  lift mode: %s", tostring(onSable), math.floor(shift + 0.5), lift.mode)
+log("config: %s", textutils.serialize(cfg):gsub("%s+", " "))
+log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_GAIN=%s LIFT_LEARN=%s MANUAL_LIFT_STEP=%s",
+  tostring(FORWARD_POWER), tostring(THRUST_RAMP), tostring(ALT_HOLD), tostring(CLIMB_SPEED),
+  tostring(LIFT_GAIN), tostring(LIFT_LEARN), tostring(MANUAL_LIFT_STEP))
+
+local ok, err = xpcall(function() parallel.waitForAny(liftLoop, ui, sampleLoop) end, debug.traceback)
+log("stopped: %s", ok and "ok" or tostring(err))
+if logFile then logFile.close() end
 -- Thrusters and turning off; the lift stays where it is so the ship doesn't drop.
 setThrusters(0)
 applyMove(nil)
 term.clear()
 term.setCursorPos(1, 1)
-if not ok and err ~= "Terminated" then print("Stopped: " .. tostring(err)) end
+if not ok and not tostring(err):find("Terminated") then
+  print("Stopped: " .. tostring(err):match("^[^\n]*"))
+  print("Details are in ship.log (pastebin put ship.log).")
+end
 print("Thrusters and turning are off. Lift is still at " .. math.floor(shift + 0.5) .. "/256.")

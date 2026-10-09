@@ -41,11 +41,20 @@ Change them in the **Keybinds** menu.
 
 Everything set up from the menus is saved in `ship.cfg`.
 
+## Log
+
+Everything is written to `ship.log` on the computer: the parts it found, your saved setup, every relay switch (and any error), typewriter keys, screens, take-offs and landings, and five times a second the lift, height, speeds and the Velocity Sensor reading. The run before is kept as `ship.log.old`. To share it:
+
+```
+pastebin put ship.log
+```
+
 ## Hardware
 
 Everything connects to the computer over wired modems (right-click each modem to connect it; chat shows its name):
 
 - **Linked Typewriter**
+- **Velocity Sensor** (optional): its reading shows on the Fly screen and goes in the log.
 - **Thrusters** (any Create Propulsion thruster): every one on the network pushes forward.
 - **Redstone Transmission** driving the four lift propellers. The program switches it to incremental mode (0-256, 16 times finer than redstone). **Remove any redstone wired to it**, or the two will fight.
 - **One Redstone Relay** with a Redstone Link (transmitting) on four of its sides, each on its own frequency. Matching receiving links sit against the straight and reverse sides of the two Directional Gearshifts. Run **G (Gearshift setup)** and it works out which side does what.
