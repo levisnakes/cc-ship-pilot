@@ -4,8 +4,9 @@
 --   F  fly (keys on the typewriter, default W A S D, Space, Left Shift)
 --   T  typewriter test: shows the last key pressed
 --   K  keybinds: change which typewriter key does what
---   G  gearshift setup: work out the turning/backward wiring
+--   G  gearshift setup: switch relay sides and save what turns/reverses
 --   H  hover calibration: find the lift level that hovers
+--   U  tuning: change flight settings with + and -
 --   M  manual test: switch relay sides, thrusters and lift by hand
 -- "ship fly" goes straight to flying.
 --
@@ -18,12 +19,11 @@
 -- menus too) it holds its height. Setup from the menus is saved in
 -- ship.cfg.
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 -- ======================== SETTINGS ===========================
--- Keys, gearshift wiring and the hover level are set from the menus.
--- To change these, put the lines in ship_settings.lua (updates never
--- touch it), e.g.  FORWARD_POWER = 10
+-- Change these from the Tuning menu (U) on the computer; what you set
+-- there is saved in ship.cfg and overrides the values below.
 
 FORWARD_POWER = 15      -- thruster power while forward is held (0-15)
 THRUST_RAMP = 30        -- how fast thrusters spool up and down (power per second)
@@ -82,16 +82,15 @@ local function defaultConfig()
   local r = relays[1] or "redstone_relay_0"
   return {
     keys = {},
-    -- One relay, a Redstone Link on four of its sides.
-    outputs = {
-      { relay = r, side = "front", prop = "left" },
-      { relay = r, side = "back",  prop = "left" },
-      { relay = r, side = "left",  prop = "right" },
-      { relay = r, side = "right", prop = "right" },
+    -- Relay sides switched on for each move. One relay, a Redstone Link
+    -- on four of its sides; Gearshift setup (G) records the real ones.
+    moves = {
+      left  = { { relay = r, side = "back" },  { relay = r, side = "left" } },
+      right = { { relay = r, side = "front" }, { relay = r, side = "right" } },
+      back  = { { relay = r, side = "back" },  { relay = r, side = "right" } },
     },
-    -- Which outputs are on for each move (numbers in the list above).
-    moves = { left = { 2, 3 }, right = { 1, 4 }, back = { 2, 4 } },
     hover = nil,
+    tune = {},
   }
 end
 
@@ -112,16 +111,37 @@ local function loadConfig()
     end
   end
   for id, name in pairs(DEFAULT_KEYS) do cfg.keys[id] = cfg.keys[id] or name end
+  -- v2.0 saved moves as numbers into an outputs list.
+  if cfg.outputs then
+    for id, list in pairs(cfg.moves) do
+      if type(list[1]) == "number" then
+        local conv = {}
+        for _, i in ipairs(list) do
+          local o = cfg.outputs[i]
+          if o then conv[#conv + 1] = { relay = o.relay, side = o.side } end
+        end
+        cfg.moves[id] = conv
+      end
+    end
+    cfg.outputs = nil
+  end
+  cfg.tune = cfg.tune or {}
+  for name, v in pairs(cfg.tune) do _ENV[name] = v end
 end
 
 -- ---------- outputs ----------
 
 local outState = {}
+local relayError = nil
 local function setOutput(o, on)
   local key = o.relay .. ":" .. o.side
   if outState[key] == on then return end
-  outState[key] = on
-  pcall(peripheral.call, o.relay, "setOutput", o.side, on)
+  local ok, err = pcall(peripheral.call, o.relay, "setOutput", o.side, on)
+  if ok then
+    outState[key] = on
+  else
+    relayError = string.format("%s %s: %s", o.relay, o.side, tostring(err))
+  end
 end
 
 local function allRelaysOff()
@@ -134,10 +154,18 @@ local currentMove = nil
 local function applyMove(move)
   currentMove = move
   local on = {}
-  if move and cfg.moves[move] then
-    for _, i in ipairs(cfg.moves[move]) do on[i] = true end
+  for _, o in ipairs(move and cfg.moves[move] or {}) do on[o.relay .. ":" .. o.side] = true end
+  -- Every side used by any move: on if it's in this one, off otherwise.
+  for _, list in pairs(cfg.moves) do
+    for _, o in ipairs(list) do setOutput(o, on[o.relay .. ":" .. o.side] == true) end
   end
-  for i, o in ipairs(cfg.outputs) do setOutput(o, on[i] == true) end
+end
+
+local function describe(list)
+  if not list or #list == 0 then return "nothing" end
+  local parts = {}
+  for _, o in ipairs(list) do parts[#parts + 1] = (#relays > 1 and (o.relay .. " ") or "") .. o.side end
+  return table.concat(parts, "+")
 end
 
 local thrust = 0
@@ -211,23 +239,26 @@ local function holdingHeight() return ALT_HOLD and onSable and alt ~= nil end
 
 local function liftStep(dt)
   if not transmission then return end
+  -- Read once: setShift yields for a tick, and the screen can change
+  -- lift.updown in the meantime.
+  local ud = lift.updown
   if lift.mode == "off" then
-    if lift.updown <= 0 then return end
+    if ud <= 0 then return end
     -- Take off: start from the saved hover level.
     lift.mode = "fly"
     lift.hover = math.max(shift, cfg.hover or 0)
     lift.holdAlt = nil
   end
   if holdingHeight() then
-    local want = lift.updown * CLIMB_SPEED
-    if lift.updown ~= 0 then
+    local want = ud * CLIMB_SPEED
+    if ud ~= 0 then
       lift.holdAlt = nil
     else
       lift.holdAlt = lift.holdAlt or alt
       want = clamp(0.5 * (lift.holdAlt - alt), -CLIMB_SPEED, CLIMB_SPEED)
     end
     -- Holding down while not moving: it's on the ground, so land.
-    if lift.updown < 0 and math.abs(vy) < 0.1 then
+    if ud < 0 and math.abs(vy) < 0.1 then
       lift.landedSince = lift.landedSince or now()
       if now() - lift.landedSince > 1.5 then
         lift.mode, lift.status, lift.landedSince = "off", "landed", nil
@@ -241,7 +272,7 @@ local function liftStep(dt)
     lift.hover = clamp(lift.hover + LIFT_LEARN * err * dt, 0, 256)
     setShift(lift.hover + LIFT_GAIN * err)
     -- Remember the hover level once it has held steady for a while.
-    if lift.updown == 0 and math.abs(vy) < 0.2 then
+    if ud == 0 and math.abs(vy) < 0.2 then
       lift.steadySince = lift.steadySince or now()
       if now() - lift.steadySince > 5 then
         lift.steadySince = now()
@@ -253,13 +284,13 @@ local function liftStep(dt)
     else
       lift.steadySince = nil
     end
-    lift.status = lift.updown > 0 and "climbing" or lift.updown < 0 and "descending"
-      or string.format("hovering at %.1f", lift.holdAlt)
+    lift.status = ud > 0 and "climbing" or ud < 0 and "descending"
+      or string.format("hovering at %.1f", lift.holdAlt or alt)
   else
     local base = cfg.hover or lift.hover or shift
     lift.hover = base
-    setShift(base + lift.updown * MANUAL_LIFT_STEP)
-    lift.status = lift.updown > 0 and "more lift" or lift.updown < 0 and "less lift" or "hover level"
+    setShift(base + ud * MANUAL_LIFT_STEP)
+    lift.status = ud > 0 and "more lift" or ud < 0 and "less lift" or "hover level"
   end
 end
 
@@ -332,7 +363,8 @@ local function flyScreen()
       for _, act in ipairs(ACTIONS) do if down(act.id) then names[#names + 1] = act.label end end
       print("Keys:   " .. (#names > 0 and table.concat(names, ", ") or "-"))
       print(string.format("Thrust: %d/15 (%d thrusters)", math.floor(thrust + 0.5), #thrusters))
-      print("Move:   " .. (currentMove or "-"))
+      print("Move:   " .. (currentMove or "-") .. (currentMove and (" (" .. describe(cfg.moves[currentMove]) .. ")") or ""))
+      if relayError then print("Relay error: " .. relayError) end
       print(liftLine())
       print("")
       print("Press Q on the computer for the menu.")
@@ -427,84 +459,51 @@ local function keybinds()
   end
 end
 
+-- Switch relay sides by hand until the ship does what you want, then save
+-- that combination as turn left, turn right or backward.
 local function gearshiftSetup()
   if #relays == 0 then screen("Gearshift setup") print("No Redstone Relay found.") pause() return end
-  screen("Gearshift setup")
-  print("Step 1: each relay side turns on in turn.")
-  print("Say which turning propeller spins.")
-  print("Do this hovering or with room to turn.")
-  pause("Press any key to start, Q to cancel.")
-  applyMove(nil)
-  allRelaysOff()
-  local found = {}
+  local list = {}
   for _, r in ipairs(relays) do
     for _, side in ipairs(RELAY_SIDES) do
-      local o = { relay = r, side = side }
-      setOutput(o, true)
-      screen("Gearshift setup")
-      print(string.format("%s, side %s is ON.", r, side))
-      print("")
-      print("Which turning propeller is spinning?")
-      print("  1 = left   2 = right   0 = neither")
-      print("  Q = cancel")
-      local ch = waitChar("120q")
-      setOutput(o, false)
-      if ch == "q" then return end
-      if ch ~= "0" then
-        found[#found + 1] = { relay = r, side = side, prop = ch == "1" and "left" or "right" }
-      end
+      if #list < 9 then list[#list + 1] = { relay = r, side = side } end
     end
   end
-  local L, R = {}, {}
-  for i, o in ipairs(found) do
-    if o.prop == "left" then L[#L + 1] = i else R[#R + 1] = i end
-  end
-  if #L == 0 or #R == 0 then
+  applyMove(nil)
+  allRelaysOff()
+  local on = {}
+  while true do
     screen("Gearshift setup")
-    print("Need at least one side for each propeller.")
-    print("Nothing was changed.")
-    pause()
-    return
-  end
-
-  local moves = {}
-  local steps = {
-    { id = "left", q = "turning LEFT" },
-    { id = "right", q = "turning RIGHT" },
-    { id = "back", q = "moving BACKWARD" },
-  }
-  for _, st in ipairs(steps) do
-    for _, li in ipairs(L) do
-      for _, ri in ipairs(R) do
-        if not moves[st.id] then
-          for i, o in ipairs(found) do setOutput(o, i == li or i == ri) end
-          screen("Gearshift setup")
-          print("Step 2: watch the ship.")
-          print("")
-          print("Is it " .. st.q .. "?")
-          print("  Y = yes   N = try the next one")
-          print("  Q = cancel")
-          local ch = waitChar("ynq")
-          if ch == "q" then allRelaysOff() return end
-          if ch == "y" then moves[st.id] = { li, ri } end
-        end
-      end
+    print("Switch sides until the ship does what")
+    print("you want, then save it. Best hovering.")
+    for i, o in ipairs(list) do
+      print(string.format(" %d  %-20s %s", i, (#relays > 1 and (o.relay .. " ") or "") .. o.side, on[i] and "ON" or "off"))
     end
-    allRelaysOff()
+    print("Save what's ON as:")
+    print(" L  turn left:  " .. describe(cfg.moves.left))
+    print(" R  turn right: " .. describe(cfg.moves.right))
+    print(" B  backward:   " .. describe(cfg.moves.back))
+    print(" C  all off     Q  done")
+    if relayError then print("Relay error: " .. relayError) end
+    local ch = waitChar("123456789lrbcq")
+    local n = tonumber(ch)
+    if n and list[n] then
+      on[n] = not on[n]
+      setOutput(list[n], on[n])
+    elseif ch == "l" or ch == "r" or ch == "b" then
+      local cur = {}
+      for i, o in ipairs(list) do if on[i] then cur[#cur + 1] = { relay = o.relay, side = o.side } end end
+      cfg.moves[ch == "l" and "left" or ch == "r" and "right" or "back"] = cur
+      saveConfig()
+    elseif ch == "c" then
+      on = {}
+      allRelaysOff()
+    elseif ch == "q" then
+      allRelaysOff()
+      outState = {}
+      return
+    end
   end
-  screen("Gearshift setup")
-  local missing = {}
-  for _, st in ipairs(steps) do if not moves[st.id] then missing[#missing + 1] = st.q end end
-  if #missing > 0 then
-    print("Nothing matched: " .. table.concat(missing, ", "))
-    print("Check the wiring and try again.")
-    print("Nothing was changed.")
-  else
-    cfg.outputs, cfg.moves = found, moves
-    saveConfig()
-    print("Saved. Turning and backward are set up.")
-  end
-  pause()
 end
 
 local function hoverCalibration()
@@ -621,6 +620,76 @@ local function manualTest()
   end
 end
 
+-- Settings you can change from the computer, saved in ship.cfg.
+local TUNE = {
+  { name = "FORWARD_POWER", label = "Forward power", step = 1, min = 0, max = 15,
+    help = { "Thruster power while forward is held." } },
+  { name = "THRUST_RAMP", label = "Thrust spool-up", step = 5, min = 5, max = 200,
+    help = { "How fast the thrusters spool up and", "down. Lower = gentler starts." } },
+  { name = "CLIMB_SPEED", label = "Climb speed", step = 0.5, min = 0.5, max = 20,
+    help = { "Blocks per second up or down while", "the key is held." } },
+  { name = "LIFT_GAIN", label = "Lift response", step = 2, min = 1, max = 100,
+    help = { "How hard the lift reacts to rising or", "sinking. Raise it if the ship sags or",
+      "reacts slowly; lower it if it bounces." } },
+  { name = "LIFT_LEARN", label = "Hover learning", step = 1, min = 0, max = 50,
+    help = { "How fast it fine-tunes the hover level.", "Lower it if the ship slowly bobs up",
+      "and down; raise it if it drifts." } },
+  { name = "hover", label = "Hover level", step = 1, min = 0, max = 256,
+    help = { "Lift level that hovers (0-256). Hover", "calibration and flying set it too." } },
+  { name = "MANUAL_LIFT_STEP", label = "Manual lift step", step = 4, min = 0, max = 128,
+    help = { "Only without a height reading: lift", "added or taken away while up/down", "is held." } },
+}
+local TUNE_DEFAULT = {}
+for _, t in ipairs(TUNE) do if t.name ~= "hover" then TUNE_DEFAULT[t.name] = _ENV[t.name] end end
+
+local function tuneValue(t)
+  if t.name == "hover" then return cfg.hover end
+  return _ENV[t.name]
+end
+
+local function setTune(t, v)
+  v = clamp(v, t.min, t.max)
+  if t.name == "hover" then
+    cfg.hover = math.floor(v + 0.5)
+    if lift.mode == "fly" then lift.hover = cfg.hover end
+  else
+    _ENV[t.name] = v
+    cfg.tune[t.name] = v
+  end
+  saveConfig()
+end
+
+local function tuning()
+  local sel = 1
+  while true do
+    screen("Tuning")
+    for i, t in ipairs(TUNE) do
+      local v = tuneValue(t)
+      print(string.format("%s%d %-17s %s", i == sel and ">" or " ", i, t.label, v and tostring(v) or "-"))
+    end
+    print("")
+    for _, line in ipairs(TUNE[sel].help) do print(line) end
+    print("")
+    print("1-7 pick  +/- change  D default  Q back")
+    print(liftLine())
+    local timer = os.startTimer(0.5)
+    local ev, a = os.pullEvent()
+    os.cancelTimer(timer)
+    if ev == "char" then
+      local t = TUNE[sel]
+      local n = tonumber(a)
+      if n and TUNE[n] then sel = n
+      elseif a == "+" or a == "=" then setTune(t, (tuneValue(t) or 0) + t.step)
+      elseif a == "-" then setTune(t, (tuneValue(t) or 0) - t.step)
+      elseif a:lower() == "d" and TUNE_DEFAULT[t.name] then
+        _ENV[t.name] = TUNE_DEFAULT[t.name]
+        cfg.tune[t.name] = nil
+        saveConfig()
+      elseif a:lower() == "q" then return end
+    end
+  end
+end
+
 local function menu()
   while true do
     screen("Menu")
@@ -634,13 +703,16 @@ local function menu()
     print("K  Keybinds")
     print("G  Gearshift setup (turning/backward)")
     print("H  Hover calibration")
+    print("U  Tuning")
     print("M  Manual test")
-    local ch = waitChar("ftkghm")
+    if relayError then print("Relay error: " .. relayError) end
+    local ch = waitChar("ftkghum")
     if ch == "f" then flyScreen()
     elseif ch == "t" then typewriterTest()
     elseif ch == "k" then keybinds()
     elseif ch == "g" then gearshiftSetup()
     elseif ch == "h" then hoverCalibration()
+    elseif ch == "u" then tuning()
     elseif ch == "m" then manualTest() end
   end
 end

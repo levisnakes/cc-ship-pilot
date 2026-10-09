@@ -34,8 +34,9 @@ Change them in the **Keybinds** menu.
 | F | Fly. Q on the computer goes back to the menu; the ship keeps hovering. |
 | T | Typewriter test: shows the last key pressed, its code, and whether it came from the typewriter or the computer keyboard. |
 | K | Keybinds: pick an action, then press the new key on the typewriter. The typewriter only passes on movement keys and keys bound to a link frequency. |
-| G | Gearshift setup: turns each relay side on in turn and asks which turning propeller spins, then tries each combination and asks whether the ship is turning left, turning right or going backward. Do it hovering or with room to turn. |
+| G | Gearshift setup: press 1-6 to switch each relay side on or off and watch the ship. When it turns left, press L to save whatever is on; R for turn right, B for backward. Any combination works, even a single side. Best done hovering. |
 | H | Hover calibration: holds a height 3 blocks above where it is and saves the lift level once it has been steady for 5 seconds. It also keeps fine-tuning that level while you fly. |
+| U | Tuning: change flight settings with + and -, live, each with a short explanation (see below). |
 | M | Manual test: switch relay sides, the thrusters and the lift by hand. |
 
 Everything set up from the menus is saved in `ship.cfg`.
@@ -51,6 +52,16 @@ Everything connects to the computer over wired modems (right-click each modem to
 
 Hovering on its own needs the ship's height, which comes from CC: Sable (the computer has to be on the ship). Without it, the lift sits at the calibrated hover level and up/down add or take away a fixed amount.
 
-## Settings
+## Tuning
 
-Tuning values are at the top of `ship.lua`: `FORWARD_POWER`, `THRUST_RAMP`, `ALT_HOLD`, `CLIMB_SPEED`, `LIFT_GAIN`, `LIFT_LEARN`, `MANUAL_LIFT_STEP`. To change one, put the line in `ship_settings.lua` (updates never touch it), for example `CLIMB_SPEED = 6`.
+Open **U (Tuning)** on the computer, ideally while the ship hovers so you can see the effect. Press 1-7 to pick a setting and + / - to change it; it's saved straight away. D puts it back to the default.
+
+| Setting | What to do |
+|---|---|
+| Forward power | Thruster power while forward is held (0-15). |
+| Thrust spool-up | Lower for gentler starts and stops. |
+| Climb speed | Blocks per second up or down. |
+| Lift response | Raise it if the ship sags or reacts slowly to up/down; lower it if it bounces up and down quickly. |
+| Hover learning | Lower it if the ship slowly bobs up and down; raise it if it drifts away from its height. |
+| Hover level | The lift level that hovers. Hover calibration (H) sets it, and so does flying. |
+| Manual lift step | Only used without a height reading (no CC: Sable). |
