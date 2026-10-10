@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "3.6.0"
+VERSION = "3.7.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -799,6 +799,30 @@ local function muteAlarm()
   if fuelAlarm and not alarmMuted then log("fuel alarm muted") end
   alarmMuted = true
 end
+-- Boost sounds: a launch whoosh when it starts, an engine rumble while
+-- it's held, and a power-down note when it stops. boostOn is set by the
+-- Fly screen while the boost key is held.
+local boostOn = false
+local function boostSoundLoop()
+  local was = false
+  local nextRumble = 0
+  while true do
+    if speaker then
+      if boostOn and not was then
+        pcall(speaker.playSound, "minecraft:entity.firework_rocket.launch", 2, 0.8)
+        nextRumble = now() + 0.4
+      elseif boostOn and now() >= nextRumble and not (fuelAlarm and not alarmMuted) then
+        pcall(speaker.playNote, "didgeridoo", 2, 4)
+        nextRumble = now() + 0.5
+      elseif was and not boostOn then
+        pcall(speaker.playNote, "bass", 2, 2)
+      end
+    end
+    was = boostOn
+    sleep(0.1)
+  end
+end
+
 local function alarmLoop()
   while true do
     if fuelAlarm and not alarmMuted and speaker then
@@ -1223,6 +1247,8 @@ local function flyScreen()
       applyMove(move)
       local ud = (down("up") and 1 or 0) - (down("down") and 1 or 0)
       if ud ~= 0 or not landing then lift.updown = ud end
+      if down("boost") ~= boostOn then log("boost %s", down("boost") and "on" or "off") end
+      boostOn = down("boost")
 
       -- Draw 10 times a second (control runs at 20), so monitors don't flicker.
       if frame % 2 == 0 then
@@ -1288,7 +1314,7 @@ local function flyScreen()
         if fuel.low then
           msgs[#msgs + 1] = { { C.bad, " LOW FUEL" }, { C.dim, LOW_FUEL_LAND > 0 and string.format(" - lands itself at %ds left", LOW_FUEL_LAND) or "" } }
         end
-        if down("boost") then msgs[#msgs + 1] = { { C.key, " BOOST" }, { C.dim, "  full forward power" } } end
+        if down("boost") then msgs[#msgs + 1] = { { C.key, " BOOST" }, { C.dim, "  full power while Ctrl is held" } } end
         if landing then msgs[#msgs + 1] = { { C.warn, " Landing" }, { C.dim, "  (any movement key takes over)" } } end
         if nav then
           msgs[#msgs + 1] = { { C.good, " Autopilot " }, nav.status or "", { C.dim, "  (any key takes over)" } }
@@ -1317,6 +1343,7 @@ local function flyScreen()
     end
   end
   lift.updown = 0
+  boostOn = false
   allThrustOff()
   applyMove(nil)
 end
@@ -2377,7 +2404,7 @@ log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_G
 pcall(mirrorToMonitor)
 REMOTE = REMOTE and http ~= nil and http.websocket ~= nil
 if REMOTE then remoteId = loadRemoteId() log("website code %s", remoteId) end
-local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop, fuelLoop, alarmLoop }
+local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop, fuelLoop, alarmLoop, boostSoundLoop }
 if REMOTE then loops[#loops + 1] = remoteLoop loops[#loops + 1] = telemetryLoop end
 local ok, err = xpcall(function() parallel.waitForAny(table.unpack(loops)) end, debug.traceback)
 log("stopped: %s", ok and "ok" or tostring(err))
