@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "3.4.0"
+VERSION = "3.5.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -58,6 +58,7 @@ LOW_FUEL_LAND = 15      -- land by itself at this much time left (0 = never)
 FUEL_ALARM_PERCENT = 70 -- a connected speaker sounds an alarm below this much lava (0 = off)
 NAV_ARRIVE = 2          -- autopilot: this close to the target counts as there
 TURN_RATE = 0.6         -- fastest the computer turns the ship (radians per second)
+SMART_TURN_RATE = 0.45  -- smart mode: how fast A/D turn the ship (radians per second, ~26 deg/s)
 
 -- Website control: https://levisnakes.github.io/cc-ship-pilot/
 -- The menu shows a code to type into the website. Messages go through the
@@ -1077,7 +1078,8 @@ local function flyScreen()
   log("throttle starts at %d", FORWARD_POWER)
   local latched = {}          -- key code -> true until its key_up
   local throttleSeen = cfg.throttleKeysSeen == true
-  local course = yaw          -- smart mode: the heading to hold
+  local course = yaw          -- smart mode: the heading to hold (the "lock")
+  local lastTurnKey = 0
   local brakeI = 0            -- smart braking: integral term
   local braking = false
   local frame = 0
@@ -1146,14 +1148,22 @@ local function flyScreen()
       if landing and manual then landing = false log("landing cancelled by hand") end
 
       if cfg.smartOn and smartReady() and not nav then
-        -- Heading hold: unless turning by hand. After a hand turn it first
-        -- stops the spin, then holds the new heading.
+        -- Heading lock. A/D turn the lock itself at SMART_TURN_RATE and the
+        -- computer fires the turning thrusters to follow it, so the ship
+        -- turns at a steady rate and stops where you let go (Sable doesn't
+        -- slow a spin by itself, so full power would just keep speeding up).
+        if course == nil then course = yaw end
         if turnL or turnR then
-          course = nil
-        else
-          if course == nil and math.abs(yawRate) < 0.05 then course = yaw end
-          target.left, target.right = steerYaw(course)
+          lastTurnKey = t
+          -- Which way "left" turns the ship comes from Smart setup.
+          local leftDir = cfg.smart.left > 0 and 1 or -1
+          local dirSign = turnL and leftDir or -leftDir
+          course = course + dirSign * SMART_TURN_RATE * dt
+          -- Don't let the lock run more than ~30 degrees ahead of the ship.
+          course = yaw + clamp(wrapAngle(course - yaw), -0.5, 0.5)
         end
+        course = wrapAngle(course)
+        target.left, target.right = steerYaw(course)
         -- Smart braking: off the gas (neither forward nor back held), a PI
         -- controller on the speed along the nose brings the ship to a stop.
         braking = false
@@ -1256,8 +1266,9 @@ local function flyScreen()
           if not smartReady() then
             msgs[#msgs + 1] = { { C.warn, " Smart mode needs Smart setup (menu S)" } }
           else
-            msgs[#msgs + 1] = { { C.good, " Smart" }, course and string.format("  holding heading %3d",
-              math.floor(math.deg(course + cfg.smart.offset) % 360 + 0.5)) or { C.dim, "  turning by hand" },
+            local turning = down("left") or down("right")
+            msgs[#msgs + 1] = { { C.good, " Smart" }, course and string.format(turning and "  turning, lock %3d" or "  holding heading %3d",
+              math.floor(math.deg(course + cfg.smart.offset) % 360 + 0.5)) or "",
               braking and { C.head, "   braking" } or "" }
           end
         end
