@@ -38,7 +38,7 @@ Change them in the **Keybinds** menu. The typewriter only passes on movement key
 | G | Gearshift setup: press 1-6 to switch each relay side on or off and watch the ship. When it turns left, press L to save whatever is on; R for turn right, B for backward. Any combination works, even a single side. Best done hovering. |
 | H | Hover calibration: holds a height 3 blocks above where it is and saves the lift level once it has been steady for 5 seconds. It also keeps fine-tuning that level while you fly. |
 | U | Tuning: change flight settings with + and -, live, each with a short explanation (see below). |
-| P | Thruster setup: pick a thruster (1-9, N/P for more pages) and set its job: **W** forward, **S** backward, **A** turn left, **D** turn right, **U** lift, **O** off. X marks them all as lift; T test-fires the picked one for a second so you can see which it is. |
+| P | Thruster setup: pick a thruster (1-9, N/P for more pages) and switch its jobs on or off: **W** forward, **S** backward, **A** turn left, **D** turn right; or **U** lift, **O** off. A thruster can have several movement jobs, for example turn left *and* backward, and fires at the strongest one in use. X marks them all as lift; T test-fires the picked one for a second so you can see which it is. |
 | M | Manual test: switch relay sides, the thrusters and the lift by hand. |
 
 Everything set up from the menus is saved in `ship.cfg`.

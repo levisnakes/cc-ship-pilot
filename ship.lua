@@ -26,7 +26,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -242,17 +242,49 @@ end
 local GROUPS = { "forward", "back", "left", "right" }
 local ROLE_LABEL = { lift = "lift", forward = "forward", back = "backward", left = "turn left",
   right = "turn right", off = "off", unset = "NOT SET" }
+local MOVE = { forward = true, back = true, left = true, right = true }
 local group = { forward = {}, back = {}, left = {}, right = {} }
-local forwardT, liftT = group.forward, {}
-local function roleOf(t)
-  return cfg.roles[t.name] or (transmission and "forward" or "unset")
+local forwardT, liftT, moveT = group.forward, {}, {}
+
+-- A thruster is "lift", "off", or has one or more movement jobs (e.g.
+-- turn left AND backward), saved as a list.
+local function rawRole(t)
+  return cfg.roles[t.name] or (transmission and "forward" or nil)
+end
+local function rolesOf(t)   -- set of movement jobs
+  local r, set = rawRole(t), {}
+  if type(r) == "table" then
+    for _, g in ipairs(r) do set[g] = true end
+  elseif MOVE[r] then
+    set[r] = true
+  end
+  return set
+end
+local function roleOf(t)    -- "lift", "off", "move" or "unset"
+  local r = rawRole(t)
+  if type(r) == "table" then return #r > 0 and "move" or "unset" end
+  if MOVE[r] then return "move" end
+  return r or "unset"
+end
+local function roleText(t)
+  local r = roleOf(t)
+  if r ~= "move" then return ROLE_LABEL[r] or r end
+  local parts, set = {}, rolesOf(t)
+  for _, g in ipairs(GROUPS) do if set[g] then parts[#parts + 1] = ROLE_LABEL[g] end end
+  return table.concat(parts, "+")
 end
 local function sortThrusters()
   group = { forward = {}, back = {}, left = {}, right = {} }
-  liftT = {}
+  liftT, moveT = {}, {}
   for _, t in ipairs(thrusters) do
     local r = roleOf(t)
-    if group[r] then group[r][#group[r] + 1] = t elseif r == "lift" then liftT[#liftT + 1] = t end
+    if r == "lift" then
+      liftT[#liftT + 1] = t
+    elseif r == "move" then
+      t.jobs = rolesOf(t)
+      moveT[#moveT + 1] = t
+      for g in pairs(t.jobs) do group[g][#group[g] + 1] = t end
+    end
   end
   forwardT = group.forward
 end
@@ -274,16 +306,26 @@ local groupPower = { forward = 0, back = 0, left = 0, right = 0 }
 local groupSent = {}
 local sentThrust = nil
 
--- Sets every group's power in one go (each call takes a tick).
+local thrusterSent = {}
+
+-- Sets every group's power in one go (each call takes a tick). A thruster
+-- with several jobs fires at the strongest of them.
 local function setGroups(want)
-  local calls = {}
   for _, g in ipairs(GROUPS) do
     local p = math.floor(clamp(want[g] or 0, 0, 15) + 0.5)
     groupPower[g] = want[g] or 0
     if p ~= groupSent[g] then
       if p == 0 or groupSent[g] == 0 or groupSent[g] == nil then log("%s thrusters -> %d", g, p) end
       groupSent[g] = p
-      for _, t in ipairs(group[g]) do calls[#calls + 1] = powerCall(t, p) end
+    end
+  end
+  local calls = {}
+  for _, t in ipairs(moveT) do
+    local p = 0
+    for g in pairs(t.jobs) do p = math.max(p, groupSent[g] or 0) end
+    if thrusterSent[t.name] ~= p then
+      thrusterSent[t.name] = p
+      calls[#calls + 1] = powerCall(t, p)
     end
   end
   callAll(calls)
@@ -936,12 +978,13 @@ local function thrusterSetup()
     for i = 1, 9 do
       local t = thrusters[first + i]
       if t then
-        print(string.format("%s%d %-20s %s", sel == first + i and ">" or " ", i, t.name, ROLE_LABEL[roleOf(t)] or roleOf(t)))
+        print(string.format("%s%d %-14s %s", sel == first + i and ">" or " ", i, t.name, roleText(t)))
       end
     end
-    print("1-9 pick, then set it:")
+    print("1-9 pick, then switch its jobs on/off")
+    print("(it can have several, e.g. turn+back):")
     print(" W forward  S backward  A turn left")
-    print(" D turn right  U lift  O off")
+    print(" D turn right   U lift   O off")
     print("T test-fire picked (1 s)   X all lift")
     if #thrusters > 9 then
       print(string.format("N / P next / previous page (%d of %d)", page + 1, math.ceil(#thrusters / 9)))
@@ -953,9 +996,20 @@ local function thrusterSetup()
     if n and thrusters[first + n] then
       sel = first + n
     elseif KEYROLE[ch] then
-      cfg.roles[t.name] = KEYROLE[ch]
+      local job = KEYROLE[ch]
+      if MOVE[job] then
+        -- Movement jobs switch on and off; a thruster can have several.
+        local list, has = {}, false
+        for g in pairs(rolesOf(t)) do
+          if g == job then has = true else list[#list + 1] = g end
+        end
+        if not has then list[#list + 1] = job end
+        cfg.roles[t.name] = #list > 0 and list or "off"
+      else
+        cfg.roles[t.name] = job
+      end
       saveConfig()
-      log("thruster setup: %s = %s", t.name, cfg.roles[t.name])
+      log("thruster setup: %s = %s", t.name, roleText(t))
     elseif ch == "x" then
       for _, x in ipairs(thrusters) do cfg.roles[x.name] = "lift" end
       saveConfig()
@@ -973,7 +1027,7 @@ local function thrusterSetup()
       -- Start everything from a clean state with the new roles.
       for _, x in ipairs(thrusters) do pcall(x.p.setPower, 0) end
       sortThrusters()
-      liftSent, groupSent = {}, {}
+      liftSent, groupSent, thrusterSent = {}, {}, {}
       groupPower = { forward = 0, back = 0, left = 0, right = 0 }
       thrust = 0
       setShift(shift)
@@ -1072,7 +1126,7 @@ logFile = fs.open(LOG_FILE, "w")
 log("Ship Pilot v%s", VERSION)
 for _, name in ipairs(peripheral.getNames()) do log("peripheral %s: %s", name, tostring(peripheral.getType(name))) end
 for _, v in ipairs(velSensors) do log("velocity sensor %s axis %s", v.name, tostring(v.axis)) end
-for _, t in ipairs(thrusters) do log("thruster %s role %s", t.name, roleOf(t)) end
+for _, t in ipairs(thrusters) do log("thruster %s role %s", t.name, roleText(t)) end
 log("Sable: %s  transmission start level: %d  lift mode: %s", tostring(onSable), math.floor(shift + 0.5), lift.mode)
 log("config: %s", textutils.serialize(cfg):gsub("%s+", " "))
 log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_GAIN=%s LIFT_LEARN=%s MANUAL_LIFT_STEP=%s",
