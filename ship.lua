@@ -7,13 +7,15 @@
 --   G  gearshift setup: switch relay sides and save what turns/reverses
 --   H  hover calibration: find the lift level that hovers
 --   U  tuning: change flight settings with + and -
+--   P  thruster setup: mark each thruster as lift or forward
 --   M  manual test: switch relay sides, thrusters and lift by hand
 -- "ship fly" goes straight to flying.
 --
--- Hardware, all on the wired modem network: the Linked Typewriter, the
--- forward thrusters, the Redstone Transmission driving the lift propellers,
--- and one Redstone Relay whose sides (through Redstone Links) power the two
--- Directional Gearshifts on the turning propellers.
+-- Hardware, all on the wired modem network: the Linked Typewriter,
+-- thrusters (each one marked lift or forward in Thruster setup), optionally
+-- a Redstone Transmission driving lift propellers, and one Redstone Relay
+-- whose sides (through Redstone Links) power the two Directional
+-- Gearshifts on the turning propellers.
 --
 -- The ship hovers on its own: whenever no up/down key is held (in the
 -- menus too) it holds its height. Setup from the menus is saved in
@@ -22,7 +24,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -69,13 +71,14 @@ local function now() return os.epoch("utc") / 1000 end
 
 local typewriter = peripheral.find("linked_typewriter")
 local transmission = peripheral.find("redstone_transmission")
-local thrusters, relays = {}, {}
+local thrusters, relays = {}, {}   -- thrusters: { name = , p = }
 for _, name in ipairs(peripheral.getNames()) do
   local t = peripheral.getType(name)
-  if THRUSTER_TYPES[t] then thrusters[#thrusters + 1] = peripheral.wrap(name) end
+  if THRUSTER_TYPES[t] then thrusters[#thrusters + 1] = { name = name, p = peripheral.wrap(name) } end
   if t == "redstone_relay" then relays[#relays + 1] = name end
 end
 table.sort(relays)
+table.sort(thrusters, function(a, b) return a.name < b.name end)
 
 -- Velocity Sensors (Create Simulated): speed along the way they face.
 local velSensors = {}
@@ -134,6 +137,7 @@ local function defaultConfig()
     },
     hover = nil,
     tune = {},
+    roles = {},   -- thruster name -> "lift", "forward" or "off"
   }
 end
 
@@ -169,6 +173,7 @@ local function loadConfig()
     cfg.outputs = nil
   end
   cfg.tune = cfg.tune or {}
+  cfg.roles = cfg.roles or {}
   for name, v in pairs(cfg.tune) do _ENV[name] = v end
 end
 
@@ -214,28 +219,78 @@ local function describe(list)
   return table.concat(parts, "+")
 end
 
+-- Each thruster is marked lift, forward or off in Thruster setup (P).
+-- Unmarked ones push forward when there's a transmission for lift.
+local forwardT, liftT = {}, {}
+local function roleOf(t)
+  return cfg.roles[t.name] or (transmission and "forward" or "unset")
+end
+local function sortThrusters()
+  forwardT, liftT = {}, {}
+  for _, t in ipairs(thrusters) do
+    local r = roleOf(t)
+    if r == "forward" then forwardT[#forwardT + 1] = t elseif r == "lift" then liftT[#liftT + 1] = t end
+  end
+end
+
+-- Peripheral calls each take a game tick, so send them all at once.
+local function callAll(calls)
+  if #calls == 1 then calls[1]() elseif #calls > 1 then parallel.waitForAll(table.unpack(calls)) end
+end
+
+local function powerCall(t, p)
+  return function()
+    local ok, err = pcall(t.p.setPower, p)
+    if not ok then log("thruster %s setPower(%d) FAILED: %s", t.name, p, tostring(err)) end
+  end
+end
+
 local thrust = 0
 local sentThrust = nil
 local function setThrusters(power)
   local p = math.floor(clamp(power, 0, 15) + 0.5)
+  if p == sentThrust then return end
   -- Spooling up/down is in the samples; log only reaching off or full.
-  if p ~= sentThrust and (p == 0 or p == math.floor(FORWARD_POWER + 0.5)) then log("thrusters -> %d", p) end
+  if p == 0 or p == math.floor(FORWARD_POWER + 0.5) then log("forward thrusters -> %d", p) end
   sentThrust = p
-  for i, t in ipairs(thrusters) do
-    local ok, err = pcall(t.setPower, p)
-    if not ok then log("thruster %d setPower FAILED: %s", i, tostring(err)) end
-  end
+  local calls = {}
+  for _, t in ipairs(forwardT) do calls[#calls + 1] = powerCall(t, p) end
+  callAll(calls)
 end
 
+-- Lift level 0-256. With lift thrusters it's shared out between them:
+-- 8 thrusters x 15 power steps = 120 steps instead of 15 if they all
+-- moved together.
 local shift = 0
 local sentShift = nil
+local liftSent = {}
+local function liftAvailable() return #liftT > 0 or transmission ~= nil end
 local function setShift(v)
   shift = clamp(v, 0, 256)
-  local s = math.floor(shift + 0.5)
-  if transmission and s ~= sentShift then
-    sentShift = s
-    local ok, err = pcall(transmission.setShiftLevel, s)
-    if not ok then log("transmission setShiftLevel(%d) FAILED: %s", s, tostring(err)) end
+  if #liftT > 0 then
+    local n = #liftT
+    local units = math.floor(shift / 256 * n * 15 + 0.5)
+    local base, extra = math.floor(units / n), units % n
+    -- Spread the thrusters getting one step more evenly through the list,
+    -- so they aren't all on one side of the ship.
+    local more = {}
+    for j = 0, extra - 1 do more[math.floor((j + 0.5) * n / extra) + 1] = true end
+    local calls = {}
+    for i, t in ipairs(liftT) do
+      local p = base + (more[i] and 1 or 0)
+      if liftSent[t.name] ~= p then
+        liftSent[t.name] = p
+        calls[#calls + 1] = powerCall(t, p)
+      end
+    end
+    callAll(calls)
+  elseif transmission then
+    local s = math.floor(shift + 0.5)
+    if s ~= sentShift then
+      sentShift = s
+      local ok, err = pcall(transmission.setShiftLevel, s)
+      if not ok then log("transmission setShiftLevel(%d) FAILED: %s", s, tostring(err)) end
+    end
   end
 end
 
@@ -308,7 +363,7 @@ local lift = { mode = "off", updown = 0, hover = nil, holdAlt = nil,
 local function holdingHeight() return ALT_HOLD and onSable and alt ~= nil end
 
 local function liftStep(dt)
-  if not transmission then return end
+  if not liftAvailable() then return end
   -- Read once: setShift yields for a tick, and the screen can change
   -- lift.updown in the meantime.
   local ud = lift.updown
@@ -443,7 +498,7 @@ local function flyScreen()
       local names = {}
       for _, act in ipairs(ACTIONS) do if down(act.id) then names[#names + 1] = act.label end end
       print("Keys:   " .. (#names > 0 and table.concat(names, ", ") or "-"))
-      print(string.format("Thrust: %d/15 (%d thrusters)", math.floor(thrust + 0.5), #thrusters))
+      print(string.format("Thrust: %d/15 (%d forward thrusters)", math.floor(thrust + 0.5), #forwardT))
       print("Move:   " .. (currentMove or "-") .. (currentMove and (" (" .. describe(cfg.moves[currentMove]) .. ")") or ""))
       if relayError then print("Relay error: " .. relayError) end
       print(liftLine())
@@ -592,7 +647,13 @@ local function gearshiftSetup()
 end
 
 local function hoverCalibration()
-  if not transmission then screen("Hover calibration") print("No Redstone Transmission found.") pause() return end
+  if not liftAvailable() then
+    screen("Hover calibration")
+    print("Nothing to lift with: mark lift thrusters")
+    print("in Thruster setup (P) first.")
+    pause()
+    return
+  end
   if holdingHeight() then
     -- Automatic: hold a height just above where it is now and wait for the
     -- lift to settle.
@@ -681,7 +742,7 @@ local function manualTest()
         print(string.format("%d  %s side %-7s %s", i, r, side, on[side] and "ON" or "off"))
       end
     end
-    print(string.format("T  forward thrusters (%d)  %s", #thrusters, thrustOn and "ON" or "off"))
+    print(string.format("T  forward thrusters (%d)  %s", #forwardT, thrustOn and "ON" or "off"))
     print(string.format("+/-  lift %d/256", math.floor(shift + 0.5)))
     print("Q  back (relays and thrusters off)")
     local ch = waitChar("123456t+=-q")
@@ -778,11 +839,69 @@ local function tuning()
   end
 end
 
+-- Mark each thruster as lift, forward or off.
+local function thrusterSetup()
+  if #thrusters == 0 then screen("Thruster setup") print("No thrusters found.") pause() return end
+  local page, sel = 0, 1
+  while true do
+    screen("Thruster setup")
+    local first = page * 9
+    for i = 1, 9 do
+      local t = thrusters[first + i]
+      if t then
+        print(string.format("%s%d %-22s %s", sel == first + i and ">" or " ", i, t.name, roleOf(t)))
+      end
+    end
+    print("")
+    print("1-9 pick   L lift   F forward   O off")
+    print("A all lift   T test-fire picked (1 s)")
+    if #thrusters > 9 then print("N / B next / back page") end
+    print("Q back")
+    local ch = waitChar("123456789lfoatnbq")
+    local n = tonumber(ch)
+    local t = thrusters[sel]
+    if n and thrusters[first + n] then
+      sel = first + n
+    elseif ch == "l" or ch == "f" or ch == "o" then
+      cfg.roles[t.name] = ch == "l" and "lift" or ch == "f" and "forward" or "off"
+      saveConfig()
+      log("thruster setup: %s = %s", t.name, cfg.roles[t.name])
+    elseif ch == "a" then
+      for _, x in ipairs(thrusters) do cfg.roles[x.name] = "lift" end
+      saveConfig()
+      log("thruster setup: all lift")
+    elseif ch == "t" then
+      log("thruster setup: test-fire %s", t.name)
+      pcall(t.p.setPower, 15)
+      sleep(1)
+      pcall(t.p.setPower, 0)
+    elseif ch == "n" and (page + 1) * 9 < #thrusters then
+      page = page + 1
+    elseif ch == "b" and page > 0 then
+      page = page - 1
+    elseif ch == "q" then
+      -- Thrusters that changed role start from a clean state.
+      local before = {}
+      for _, x in ipairs(liftT) do before[x.name] = true end
+      sortThrusters()
+      liftSent, sentThrust = {}, nil
+      for _, x in ipairs(thrusters) do
+        if roleOf(x) ~= "lift" and before[x.name] then pcall(x.p.setPower, 0) end
+      end
+      setShift(shift)
+      return
+    end
+  end
+end
+
 local function menu()
   while true do
     screen("Menu")
-    print(string.format("Typewriter %s, transmission %s,", typewriter and "ok" or "MISSING", transmission and "ok" or "MISSING"))
-    print(string.format("%d thrusters, %d relays%s", #thrusters, #relays, onSable and ", Sable ship" or ""))
+    print(string.format("Typewriter %s, %d relays%s", typewriter and "ok" or "MISSING", #relays, onSable and ", Sable ship" or ""))
+    local unset = 0
+    for _, t in ipairs(thrusters) do if roleOf(t) == "unset" then unset = unset + 1 end end
+    print(string.format("Thrusters: %d lift, %d forward%s%s", #liftT, #forwardT,
+      unset > 0 and (", " .. unset .. " NOT SET UP (P)") or "", transmission and ", transmission" or ""))
     print("Hover level: " .. (cfg.hover and (cfg.hover .. "/256") or "not calibrated"))
     print(liftLine())
     print("")
@@ -792,15 +911,17 @@ local function menu()
     print("G  Gearshift setup (turning/backward)")
     print("H  Hover calibration")
     print("U  Tuning")
+    print("P  Thruster setup (lift / forward)")
     print("M  Manual test")
     if relayError then print("Relay error: " .. relayError) end
-    local ch = waitChar("ftkghum")
+    local ch = waitChar("ftkghupm")
     if ch == "f" then flyScreen()
     elseif ch == "t" then typewriterTest()
     elseif ch == "k" then keybinds()
     elseif ch == "g" then gearshiftSetup()
     elseif ch == "h" then hoverCalibration()
     elseif ch == "u" then tuning()
+    elseif ch == "p" then thrusterSetup()
     elseif ch == "m" then manualTest() end
   end
 end
@@ -809,7 +930,21 @@ end
 
 local args = { ... }
 loadConfig()
-if transmission then
+sortThrusters()
+if #liftT > 0 then
+  -- Already flying when the program starts (e.g. after a reboot): pick up
+  -- the lift thrusters' current power and hover.
+  local total = 0
+  for _, t in ipairs(liftT) do
+    local ok, v = pcall(t.p.getPower)
+    v = ok and type(v) == "number" and v or 0
+    if v > 1 then v = v / 15 end   -- 0-15 or 0-1, whichever it reports
+    total = total + v
+    liftSent[t.name] = math.floor(v * 15 + 0.5)
+  end
+  shift = total / #liftT * 256
+  if shift > 1 then lift.mode, lift.hover = "fly", shift end
+elseif transmission then
   pcall(transmission.setTransmissionMode, "incremental")
   local ok, cur = pcall(transmission.getShiftLevel)
   shift = ok and type(cur) == "number" and cur or 0
@@ -847,6 +982,7 @@ logFile = fs.open(LOG_FILE, "w")
 log("Ship Pilot v%s", VERSION)
 for _, name in ipairs(peripheral.getNames()) do log("peripheral %s: %s", name, tostring(peripheral.getType(name))) end
 for _, v in ipairs(velSensors) do log("velocity sensor %s axis %s", v.name, tostring(v.axis)) end
+for _, t in ipairs(thrusters) do log("thruster %s role %s", t.name, roleOf(t)) end
 log("Sable: %s  transmission start level: %d  lift mode: %s", tostring(onSable), math.floor(shift + 0.5), lift.mode)
 log("config: %s", textutils.serialize(cfg):gsub("%s+", " "))
 log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_GAIN=%s LIFT_LEARN=%s MANUAL_LIFT_STEP=%s",
