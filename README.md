@@ -20,7 +20,7 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 | Default key | Does |
 |---|---|
 | W | forward thrusters |
-| S | backward thrusters |
+| S | backward thrusters, at the throttle's power (up to Backward power in Tuning) |
 | A / D | turn left / right thrusters |
 | Space | up |
 | Left Shift | down (hold it on the ground to land and switch the lift off) |
@@ -95,7 +95,7 @@ Open **U (Tuning)** on the computer, ideally while the ship hovers so you can se
 | Setting | What to do |
 |---|---|
 | Forward power | Throttle: thruster power while forward is held (0-15). The arrow keys change it too. |
-| Backward power | Backward thrusters' power. |
+| Backward power | The most power reverse (S) uses; S follows the throttle up to this. |
 | Turning power | Turning thrusters' power; lower it if the ship spins too fast. |
 | Thrust spool-up | Lower for gentler starts and stops. |
 | Climb speed | Blocks per second up or down. |

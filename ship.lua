@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "3.7.0"
+VERSION = "3.8.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -39,7 +39,7 @@ VERSION = "3.7.0"
 START_THROTTLE = 5      -- throttle each time Fly opens (0-15)
 FORWARD_POWER = 15      -- throttle: thruster power while forward is held (0-15);
                         -- the faster/slower keys change it while flying
-BACK_POWER = 15         -- backward thrusters' power (0-15)
+BACK_POWER = 15         -- most power the backward thrusters use (0-15); S follows the throttle
 TURN_POWER = 5          -- turning thrusters' power (0-15); also set on the Fly screen
 THRUST_RAMP = 30        -- how fast thrusters spool up and down (power per second)
 ALT_HOLD = true         -- hold height on a Sable ship (needs CC: Sable)
@@ -1177,7 +1177,8 @@ local function flyScreen()
       local target = {
         -- Boost (Ctrl): full forward power, whatever the throttle says.
         forward = down("boost") and 15 or (down("forward") and FORWARD_POWER or 0),
-        back = down("back") and BACK_POWER or 0,
+        -- Reverse follows the throttle (Backward power is the most it uses).
+        back = down("back") and math.min(FORWARD_POWER, BACK_POWER) or 0,
         left = turnL and TURN_POWER or 0,
         right = turnR and TURN_POWER or 0,
       }
@@ -1622,7 +1623,7 @@ local TUNE = {
   { name = "START_THROTTLE", label = "Start throttle", step = 1, min = 0, max = 15,
     help = { "Throttle each time Fly opens. The arrow", "keys change it while flying." } },
   { name = "BACK_POWER", label = "Backward power", step = 1, min = 0, max = 15,
-    help = { "Backward thrusters' power." } },
+    help = { "Most power reverse (S) uses; it follows", "the throttle up to this." } },
   { name = "TURN_POWER", label = "Turning power", step = 1, min = 0, max = 15,
     help = { "Turning thrusters' power. Lower it if", "the ship spins too fast." } },
   { name = "THRUST_RAMP", label = "Thrust spool-up", step = 5, min = 5, max = 200,
