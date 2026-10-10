@@ -61,6 +61,8 @@ If fluid tanks are connected (for example a lava tank, with Advanced Peripherals
 
 With **LOW_FUEL_SECONDS** (30) of flying left it warns; at **LOW_FUEL_LAND** (15) it lands by itself so the ship comes down under control instead of falling (set it to 0 in `ship_settings.lua` to turn that off). Fuel also shows on the website.
 
+**Fuel alarm:** with a **speaker** connected, an alarm sounds while the lava tank is below **FUEL_ALARM_PERCENT** (70%). Mute it with **X** (or the Mute button on the menu, Fly and Systems screens, or on the website); it re-arms once the tank refills a little above 70%.
+
 ## Log
 
 Everything is written to `ship.log` on the computer: the parts it found, your saved setup, every relay switch (and any error), typewriter keys, screens, take-offs and landings, and five times a second the lift, height, speeds and the Velocity Sensor reading. The run before is kept as `ship.log.old`. To share it:
@@ -95,4 +97,4 @@ Open **U (Tuning)** on the computer, ideally while the ship hovers so you can se
 | Lift response | Raise it if the ship sags or reacts slowly to up/down; lower it if it bounces up and down quickly. |
 | Hover learning | Lower it if the ship slowly bobs up and down; raise it if it drifts away from its height. |
 | Hover level | The lift level that hovers. Hover calibration (H) sets it, and so does flying. |
-| Manual lift step | Only used without a height reading (no CC: Sable). |
+| Autopilot speed | Top speed when flying to coordinates (blocks per second). |

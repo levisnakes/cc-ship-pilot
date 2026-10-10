@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -55,6 +55,7 @@ NAV_SPEED = 10          -- autopilot top speed (blocks per second)
 -- Fuel (lava in the fluid tanks and the thrusters).
 LOW_FUEL_SECONDS = 30   -- warn when this much flying time is left
 LOW_FUEL_LAND = 15      -- land by itself at this much time left (0 = never)
+FUEL_ALARM_PERCENT = 70 -- a connected speaker sounds an alarm below this much lava (0 = off)
 NAV_ARRIVE = 2          -- autopilot: this close to the target counts as there
 TURN_RATE = 0.6         -- fastest the computer turns the ship (radians per second)
 
@@ -779,12 +780,47 @@ local function timeText(sec)
   return string.format("%ds", math.floor(sec))
 end
 
+-- Fuel alarm on a speaker: sounds while the tank is below FUEL_ALARM_PERCENT
+-- until muted; re-arms once it refills a little above that.
+local speaker = peripheral.find("speaker")
+local fuelAlarm, alarmMuted = false, false
+local function fuelPercent()
+  if not fuel.cap or fuel.cap <= 0 then return nil end
+  return fuel.tank / fuel.cap * 100
+end
+local function muteAlarm()
+  if fuelAlarm and not alarmMuted then log("fuel alarm muted") end
+  alarmMuted = true
+end
+local function alarmLoop()
+  while true do
+    if fuelAlarm and not alarmMuted and speaker then
+      pcall(speaker.playNote, "bit", 3, 20)
+      sleep(0.15)
+      pcall(speaker.playNote, "bit", 3, 12)
+      sleep(0.15)
+      pcall(speaker.playNote, "bell", 3, 24)
+    end
+    sleep(0.8)
+  end
+end
+
 -- Reads fuel every second; warns, and lands before it runs dry.
 local function fuelLoop()
   local warned = false
   while true do
     if fuelKnown() then
       readFuel()
+      local pct = fuelPercent()
+      if pct and FUEL_ALARM_PERCENT > 0 then
+        if pct < FUEL_ALARM_PERCENT and not fuelAlarm then
+          fuelAlarm = true
+          log("FUEL ALARM: tank at %.0f%%", pct)
+        elseif pct >= FUEL_ALARM_PERCENT + 3 and fuelAlarm then
+          fuelAlarm, alarmMuted = false, false
+          log("fuel alarm cleared: tank at %.0f%%", pct)
+        end
+      end
       local flying = lift.mode == "fly"
       fuel.low = flying and fuel.left ~= nil and fuel.left < LOW_FUEL_SECONDS
       if fuel.low and not warned then
@@ -1054,6 +1090,8 @@ local function flyScreen()
       if c == "q" then break
       elseif c == "+" or c == "=" then stepThrottle(1)
       elseif c == "-" then stepThrottle(-1)
+      elseif c == "x" then
+        muteAlarm()
       elseif c == "m" then
         cfg.smartOn = not cfg.smartOn
         course = yaw
@@ -1157,6 +1195,10 @@ local function flyScreen()
         local fp = fuelParts()
         out(" Fuel      ", table.unpack(fp))
         if fuel.low then out({ C.bad, " LOW FUEL" }, { C.dim, LOW_FUEL_LAND > 0 and string.format(" - lands itself at %ds left", LOW_FUEL_LAND) or "" }) end
+        if fuelAlarm then
+          out(" ", { C.bad, "FUEL ALARM" }, { C.dim, string.format(" - lava below %d%%%s", FUEL_ALARM_PERCENT,
+            alarmMuted and " (muted)" or (speaker and "" or " (no speaker)")) })
+        end
       end
       if landing then out(" ", { C.warn, "Landing" }, { C.dim, "  (any key takes over)" }) end
       if nav then
@@ -1170,8 +1212,10 @@ local function flyScreen()
               or "  turning by hand" })
         end
       end
-      footer({ { "Q", "Menu", { char = "q" } }, { "-", "", { char = "-" } }, { "+", "", { char = "+" } },
-        { "M", cfg.smartOn and "Smart ON" or "Smart off", { char = "m" } } })
+      local items = { { "Q", "Menu", { char = "q" } }, { "-", "", { char = "-" } }, { "+", "", { char = "+" } },
+        { "M", cfg.smartOn and "Smart ON" or "Smart off", { char = "m" } } }
+      if fuelAlarm and not alarmMuted then items[#items + 1] = { "X", "Mute alarm", { char = "x" } } end
+      footer(items)
       timer = os.startTimer(0.05)
     end
   end
@@ -1855,11 +1899,14 @@ local function systemsScreen()
         out(string.format(" %-22s ", nm), state)
       end
     end
-    footer({ { "Q", "Back", { char = "q" } } })
+    local items = { { "Q", "Back", { char = "q" } } }
+    if fuelAlarm and not alarmMuted then items[#items + 1] = { "X", "Mute fuel alarm", { char = "x" } } end
+    footer(items)
     local timer = os.startTimer(1)
     local ev, a = os.pullEvent()
     os.cancelTimer(timer)
     if ev == "char" and a:lower() == "q" then return end
+    if ev == "char" and a:lower() == "x" then muteAlarm() end
   end
 end
 
@@ -1884,7 +1931,8 @@ local function menu()
     local trouble = false
     for _, m in ipairs(machineInfo) do if m.over then trouble = true end end
     if fuelKnown() then
-      out(" ", { C.key, "Y" }, " Fuel     ", table.unpack(fuelParts()))
+      out(" ", { C.key, "Y" }, fuelAlarm and " " or " Fuel     ", fuelAlarm and { C.bad, "ALARM    " } or "",
+        table.unpack(fuelParts()))
     elseif #machineNames > 0 then
       out(" ", { C.key, "Y" }, " Systems  ", { C.dim, #machineNames .. " machines" })
     end
@@ -1909,11 +1957,15 @@ local function menu()
     if relayError then
       fg(C.bad) write(("Relay error: " .. relayError):sub(1, W - 2)) fg(colors.white)
     end
-    local ch = waitChar("ftkghupmasy")
+    if fuelAlarm and not alarmMuted then
+      footer({ { "X", "Mute fuel alarm", { char = "x" } }, { "", string.format("lava below %d%%", FUEL_ALARM_PERCENT) } })
+    end
+    local ch = waitChar("ftkghupmasyx")
     if ch == "f" then flyScreen()
     elseif ch == "a" then if nav then autopilotScreen() else gotoScreen() end
     elseif ch == "s" then smartSetup()
     elseif ch == "y" then systemsScreen()
+    elseif ch == "x" then muteAlarm()
     elseif ch == "t" then typewriterTest()
     elseif ch == "k" then keybinds()
     elseif ch == "g" then gearshiftSetup()
@@ -1982,7 +2034,7 @@ local function telemetry()
   if yaw then t.hd = math.floor(math.deg(noseYaw()) % 360 + 0.5) end
   if fuelKnown() then
     t.fuel = { a = fuel.tank + fuel.inThrusters, c = fuel.cap, r = r1(fuel.rate),
-      l = fuel.left and math.floor(fuel.left) or nil, low = fuel.low }
+      l = fuel.left and math.floor(fuel.left) or nil, low = fuel.low, alarm = fuelAlarm, muted = alarmMuted }
   end
   if landing then t.landing = true end
   if nav then t.nav = { mode = nav.mode, x = nav.x, y = nav.y, z = nav.z, s = nav.status } end
@@ -2033,6 +2085,8 @@ local function handleCommand(c)
   elseif c.c == "smart" then
     cfg.smartOn = c.on == true
     saveConfig()
+  elseif c.c == "mute" then
+    muteAlarm()
   elseif c.c == "throttle" and tonumber(c.v) then
     FORWARD_POWER = clamp(math.floor(tonumber(c.v) + 0.5), 0, 15)
   end
@@ -2077,6 +2131,7 @@ local function telemetryLoop()
       if #trail > 60 then table.remove(trail, 1) end
     end
     local shape = tostring(currentScreen) .. liftBadge() .. tostring(cfg.smartOn) .. (nav and nav.mode or "-")
+      .. tostring(fuelAlarm) .. tostring(alarmMuted)
     local due = wantUpdate or (shape ~= lastShape and now() - lastSent > 2)
       or (moving and now() - lastSent > TELEMETRY_SECONDS)
     if due and remoteState == "connected" then
@@ -2205,6 +2260,7 @@ for _, name in ipairs(peripheral.getNames()) do log("peripheral %s: %s", name, t
 for _, v in ipairs(velSensors) do log("velocity sensor %s axis %s", v.name, tostring(v.axis)) end
 for _, t in ipairs(thrusters) do log("thruster %s role %s", t.name, roleText(t)) end
 for _, n in ipairs(tankNames) do log("fuel tank %s", n) end
+log("speaker: %s", speaker and "found" or "none")
 for _, n in ipairs(machineNames) do log("machine %s", n) end
 log("Sable: %s  transmission start level: %d  lift mode: %s", tostring(onSable), math.floor(shift + 0.5), lift.mode)
 log("config: %s", textutils.serialize(cfg):gsub("%s+", " "))
@@ -2215,7 +2271,7 @@ log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_G
 pcall(mirrorToMonitor)
 REMOTE = REMOTE and http ~= nil and http.websocket ~= nil
 if REMOTE then remoteId = loadRemoteId() log("website code %s", remoteId) end
-local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop, fuelLoop }
+local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop, fuelLoop, alarmLoop }
 if REMOTE then loops[#loops + 1] = remoteLoop loops[#loops + 1] = telemetryLoop end
 local ok, err = xpcall(function() parallel.waitForAny(table.unpack(loops)) end, debug.traceback)
 log("stopped: %s", ok and "ok" or tostring(err))

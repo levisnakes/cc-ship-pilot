@@ -92,7 +92,7 @@
   <div class="stack">
     <section class="card">
       <h2>Status</h2>
-      <div><span class="chip" id="badge">—</span> <span class="chip" id="smartChip">smart —</span> <span class="chip" id="liveChip">offline</span> <span class="chip" id="fuelChip" style="display:none"></span></div>
+      <div><span class="chip" id="badge">—</span> <span class="chip" id="smartChip">smart —</span> <span class="chip" id="liveChip">offline</span> <span class="chip" id="fuelChip" style="display:none"></span> <button id="muteBtn" class="danger" style="display:none;padding:2px 10px;font-size:12px">Mute fuel alarm</button></div>
       <div class="status" id="statusText">Waiting for the ship…</div>
       <div class="hint" id="subText" style="margin:0"></div>
       <div class="stats">
@@ -179,7 +179,7 @@
   }
 
   const LABEL = { goto: "Go to", hold: "Hold here", cancel: "Cancel autopilot", land: "Land", smart: "Smart mode",
-    throttle: "Throttle", ping: "Refresh" };
+    throttle: "Throttle", ping: "Refresh", mute: "Mute fuel alarm" };
   async function send(c, extra = {}, quiet = false) {
     const text = (LABEL[c] || c) + (extra.x !== undefined ? ` → ${extra.x} ${extra.y ?? "(keep)"} ${extra.z}` : "")
       + (extra.on !== undefined ? (extra.on ? " on" : " off") : "") + (extra.v !== undefined ? ` ${extra.v}` : "");
@@ -235,9 +235,12 @@
       const f = t.fuel;
       $("sFuel").textContent = f ? `${f.a} mB` + (f.c ? ` (${Math.round(f.a / f.c * 100)}%)` : "") : "—";
       $("sFuelLeft").textContent = f ? (f.l !== undefined && f.l !== null ? (f.l >= 60 ? `${Math.floor(f.l / 60)}m ${f.l % 60}s` : `${f.l}s`) : (f.r < -0.5 ? "refilling" : "not burning")) : "—";
-      $("fuelChip").style.display = (f && f.low) || t.landing ? "" : "none";
-      $("fuelChip").className = "chip " + (f && f.low ? "warn" : "info");
-      $("fuelChip").textContent = f && f.low ? (t.landing ? "LOW FUEL - landing" : "LOW FUEL") : "landing";
+      const alarm = f && f.alarm;
+      $("fuelChip").style.display = (f && f.low) || t.landing || alarm ? "" : "none";
+      $("fuelChip").className = "chip " + (f && (f.low || alarm) ? "warn" : "info");
+      $("fuelChip").textContent = f && f.low ? (t.landing ? "LOW FUEL - landing" : "LOW FUEL")
+        : alarm ? (f.muted ? "FUEL ALARM (muted)" : "FUEL ALARM") : "landing";
+      $("muteBtn").style.display = alarm && !f.muted ? "" : "none";
       $("smartBtn").textContent = t.smart ? "Smart mode: ON" : "Smart mode: off";
       $("smartBtn").className = t.smart ? "on" : "";
       if (document.activeElement !== $("thr") && t.thr !== undefined) { $("thr").value = t.thr; $("thrVal").textContent = t.thr; }
@@ -314,6 +317,7 @@
   $("cancelBtn").onclick = () => send("cancel");
   $("landBtn").onclick = () => { if (confirm("Land the ship where it is?")) send("land"); };
   $("pingBtn").onclick = () => send("ping");
+  $("muteBtn").onclick = () => send("mute");
   $("smartBtn").onclick = () => send("smart", { on: !(last && last.smart) });
   $("thr").oninput = () => { $("thrVal").textContent = $("thr").value; };
   $("thr").onchange = () => send("throttle", { v: Number($("thr").value) });
