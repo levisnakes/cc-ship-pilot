@@ -20,8 +20,8 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 | Default key | Does |
 |---|---|
 | W | forward thrusters |
-| S | backward (both turning propellers push back) |
-| A / D | turn left / right |
+| S | backward thrusters |
+| A / D | turn left / right thrusters |
 | Space | up |
 | Left Shift | down (hold it on the ground to land and switch the lift off) |
 | ↑ / ↓ arrows | throttle: forward power 0-15, one step per tap (repeats while held). W fires at this power. |
@@ -38,7 +38,7 @@ Change them in the **Keybinds** menu. The typewriter only passes on movement key
 | G | Gearshift setup: press 1-6 to switch each relay side on or off and watch the ship. When it turns left, press L to save whatever is on; R for turn right, B for backward. Any combination works, even a single side. Best done hovering. |
 | H | Hover calibration: holds a height 3 blocks above where it is and saves the lift level once it has been steady for 5 seconds. It also keeps fine-tuning that level while you fly. |
 | U | Tuning: change flight settings with + and -, live, each with a short explanation (see below). |
-| P | Thruster setup: mark each thruster as **Lift** (L), **Forward** (F) or off (O). A marks them all as lift; T test-fires the picked one for a second so you can see which it is. |
+| P | Thruster setup: pick a thruster (1-9, N/P for more pages) and set its job: **W** forward, **S** backward, **A** turn left, **D** turn right, **U** lift, **O** off. X marks them all as lift; T test-fires the picked one for a second so you can see which it is. |
 | M | Manual test: switch relay sides, the thrusters and the lift by hand. |
 
 Everything set up from the menus is saved in `ship.cfg`.
@@ -57,19 +57,21 @@ Everything connects to the computer over wired modems (right-click each modem to
 
 - **Linked Typewriter**
 - **Velocity Sensor** (optional): its reading shows on the Fly screen and goes in the log.
-- **Thrusters** (any Create Propulsion thruster). Mark each as lift or forward in **P (Thruster setup)**. Lift thrusters share the lift between them: each has 15 power steps, so 8 of them give 120 steps for smooth hovering. A big multiblock thruster is one peripheral; if it doesn't fire, put its modem on a different block of it.
+- **Thrusters** (any Create Propulsion thruster). Give each a job in **P (Thruster setup)**: lift, forward, backward, turn left or turn right. Lift thrusters share the lift between them: each has 15 power steps, so 8 of them give 120 steps for smooth hovering. A big multiblock thruster is one peripheral; if it doesn't fire, put its modem on a different block of it.
 - **Redstone Transmission** (optional, the old way): drives lift propellers instead of lift thrusters. The program switches it to incremental mode (0-256). **Remove any redstone wired to it**, or the two will fight.
-- **One Redstone Relay** with a Redstone Link (transmitting) on four of its sides, each on its own frequency. Matching receiving links sit against the straight and reverse sides of the two Directional Gearshifts. Run **G (Gearshift setup)** and it works out which side does what.
+- **Redstone Relay + Directional Gearshifts** (optional, the old way of turning): one relay with a Redstone Link (transmitting) on four of its sides, each on its own frequency. Matching receiving links sit against the straight and reverse sides of the two Directional Gearshifts. Run **G (Gearshift setup)** and it works out which side does what.
 
 Hovering on its own needs the ship's height, which comes from CC: Sable (the computer has to be on the ship). Without it, the lift sits at the calibrated hover level and up/down add or take away a fixed amount.
 
 ## Tuning
 
-Open **U (Tuning)** on the computer, ideally while the ship hovers so you can see the effect. Press 1-7 to pick a setting and + / - to change it; it's saved straight away. D puts it back to the default.
+Open **U (Tuning)** on the computer, ideally while the ship hovers so you can see the effect. Press 1-9 to pick a setting and + / - to change it; it's saved straight away. D puts it back to the default.
 
 | Setting | What to do |
 |---|---|
-| Forward power | Thruster power while forward is held (0-15). |
+| Forward power | Throttle: thruster power while forward is held (0-15). The arrow keys change it too. |
+| Backward power | Backward thrusters' power. |
+| Turning power | Turning thrusters' power; lower it if the ship spins too fast. |
 | Thrust spool-up | Lower for gentler starts and stops. |
 | Climb speed | Blocks per second up or down. |
 | Lift response | Raise it if the ship sags or reacts slowly to up/down; lower it if it bounces up and down quickly. |

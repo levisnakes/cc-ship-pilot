@@ -8,7 +8,8 @@
 --   G  gearshift setup: switch relay sides and save what turns/reverses
 --   H  hover calibration: find the lift level that hovers
 --   U  tuning: change flight settings with + and -
---   P  thruster setup: mark each thruster as lift or forward
+--   P  thruster setup: mark each thruster as lift, forward, backward,
+--      turn left or turn right
 --   M  manual test: switch relay sides, thrusters and lift by hand
 -- "ship fly" goes straight to flying.
 --
@@ -25,7 +26,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -33,6 +34,8 @@ VERSION = "2.4.0"
 
 FORWARD_POWER = 15      -- throttle: thruster power while forward is held (0-15);
                         -- the faster/slower keys change it while flying
+BACK_POWER = 15         -- backward thrusters' power (0-15)
+TURN_POWER = 15         -- turning thrusters' power (0-15)
 THRUST_RAMP = 30        -- how fast thrusters spool up and down (power per second)
 ALT_HOLD = true         -- hold height on a Sable ship (needs CC: Sable)
 CLIMB_SPEED = 4         -- blocks per second up or down while the key is held
@@ -83,7 +86,16 @@ for _, name in ipairs(peripheral.getNames()) do
   if t == "redstone_relay" then relays[#relays + 1] = name end
 end
 table.sort(relays)
-table.sort(thrusters, function(a, b) return a.name < b.name end)
+local function natural(name)
+  local base, n = name:match("^(.-)(%d+)$")
+  return base or name, tonumber(n) or -1
+end
+table.sort(thrusters, function(a, b)
+  local ab, an = natural(a.name)
+  local bb, bn = natural(b.name)
+  if ab ~= bb then return ab < bb end
+  return an < bn
+end)
 
 -- Velocity Sensors (Create Simulated): speed along the way they face.
 local velSensors = {}
@@ -142,7 +154,7 @@ local function defaultConfig()
     },
     hover = nil,
     tune = {},
-    roles = {},   -- thruster name -> "lift", "forward" or "off"
+    roles = {},   -- thruster name -> lift, forward, back, left, right or off
   }
 end
 
@@ -226,16 +238,23 @@ end
 
 -- Each thruster is marked lift, forward or off in Thruster setup (P).
 -- Unmarked ones push forward when there's a transmission for lift.
-local forwardT, liftT = {}, {}
+-- Movement thruster groups, fired by their keys while flying.
+local GROUPS = { "forward", "back", "left", "right" }
+local ROLE_LABEL = { lift = "lift", forward = "forward", back = "backward", left = "turn left",
+  right = "turn right", off = "off", unset = "NOT SET" }
+local group = { forward = {}, back = {}, left = {}, right = {} }
+local forwardT, liftT = group.forward, {}
 local function roleOf(t)
   return cfg.roles[t.name] or (transmission and "forward" or "unset")
 end
 local function sortThrusters()
-  forwardT, liftT = {}, {}
+  group = { forward = {}, back = {}, left = {}, right = {} }
+  liftT = {}
   for _, t in ipairs(thrusters) do
     local r = roleOf(t)
-    if r == "forward" then forwardT[#forwardT + 1] = t elseif r == "lift" then liftT[#liftT + 1] = t end
+    if group[r] then group[r][#group[r] + 1] = t elseif r == "lift" then liftT[#liftT + 1] = t end
   end
+  forwardT = group.forward
 end
 
 -- Peripheral calls each take a game tick, so send them all at once.
@@ -250,17 +269,34 @@ local function powerCall(t, p)
   end
 end
 
-local thrust = 0
+local thrust = 0                 -- forward power right now (spooling)
+local groupPower = { forward = 0, back = 0, left = 0, right = 0 }
+local groupSent = {}
 local sentThrust = nil
-local function setThrusters(power)
-  local p = math.floor(clamp(power, 0, 15) + 0.5)
-  if p == sentThrust then return end
-  -- Spooling up/down is in the samples; log only reaching off or full.
-  if p == 0 or p == math.floor(FORWARD_POWER + 0.5) then log("forward thrusters -> %d", p) end
-  sentThrust = p
+
+-- Sets every group's power in one go (each call takes a tick).
+local function setGroups(want)
   local calls = {}
-  for _, t in ipairs(forwardT) do calls[#calls + 1] = powerCall(t, p) end
+  for _, g in ipairs(GROUPS) do
+    local p = math.floor(clamp(want[g] or 0, 0, 15) + 0.5)
+    groupPower[g] = want[g] or 0
+    if p ~= groupSent[g] then
+      if p == 0 or groupSent[g] == 0 or groupSent[g] == nil then log("%s thrusters -> %d", g, p) end
+      groupSent[g] = p
+      for _, t in ipairs(group[g]) do calls[#calls + 1] = powerCall(t, p) end
+    end
+  end
   callAll(calls)
+end
+
+local function setThrusters(power)
+  thrust = power
+  setGroups({ forward = power, back = groupPower.back, left = groupPower.left, right = groupPower.right })
+end
+
+local function allThrustOff()
+  thrust = 0
+  setGroups({ forward = 0, back = 0, left = 0, right = 0 })
 end
 
 -- Lift level 0-256. With lift thrusters it's shared out between them:
@@ -510,10 +546,22 @@ local function flyScreen()
         -- Save once the key is let go, not on every step.
         if throttleChanged then saveConfig() throttleChanged = false end
       end
-      local want = down("forward") and FORWARD_POWER or 0
+      -- Each thruster group spools toward its power while its key is held.
+      local turnL = down("left") and not down("right")
+      local turnR = down("right") and not down("left")
+      local target = {
+        forward = down("forward") and FORWARD_POWER or 0,
+        back = down("back") and BACK_POWER or 0,
+        left = turnL and TURN_POWER or 0,
+        right = turnR and TURN_POWER or 0,
+      }
       local step = THRUST_RAMP * dt
-      thrust = thrust + clamp(want - thrust, -step, step)
-      setThrusters(thrust)
+      local want = {}
+      for _, g in ipairs(GROUPS) do
+        want[g] = groupPower[g] + clamp(target[g] - groupPower[g], -step, step)
+      end
+      thrust = want.forward
+      setGroups(want)
       -- turning wins over backward when both are held
       local move = nil
       if down("left") and not down("right") then move = "left"
@@ -526,9 +574,13 @@ local function flyScreen()
       local names = {}
       for _, act in ipairs(ACTIONS) do if down(act.id) then names[#names + 1] = act.label end end
       print("Keys:   " .. (#names > 0 and table.concat(names, ", ") or "-"))
-      print(string.format("Throttle: %d/15   Thrust now: %d (%d thruster%s)", math.floor(FORWARD_POWER + 0.5),
-        math.floor(thrust + 0.5), #forwardT, #forwardT == 1 and "" or "s"))
-      print("Move:   " .. (currentMove or "-") .. (currentMove and (" (" .. describe(cfg.moves[currentMove]) .. ")") or ""))
+      print(string.format("Throttle: %d/15", math.floor(FORWARD_POWER + 0.5)))
+      print(string.format("Thrust: fwd %d  back %d  turn L %d  R %d",
+        math.floor(groupPower.forward + 0.5), math.floor(groupPower.back + 0.5),
+        math.floor(groupPower.left + 0.5), math.floor(groupPower.right + 0.5)))
+      if #relays > 0 then
+        print("Relays: " .. (currentMove or "-") .. (currentMove and (" (" .. describe(cfg.moves[currentMove]) .. ")") or ""))
+      end
       if relayError then print("Relay error: " .. relayError) end
       print(liftLine())
       if #velSensors > 0 then print("Speed sensor: " .. velText()) end
@@ -539,8 +591,8 @@ local function flyScreen()
     end
   end
   if throttleChanged then saveConfig() end
-  lift.updown, thrust = 0, 0
-  setThrusters(0)
+  lift.updown = 0
+  allThrustOff()
   applyMove(nil)
 end
 
@@ -802,6 +854,10 @@ end
 local TUNE = {
   { name = "FORWARD_POWER", label = "Forward power", step = 1, min = 0, max = 15,
     help = { "Thruster power while forward is held." } },
+  { name = "BACK_POWER", label = "Backward power", step = 1, min = 0, max = 15,
+    help = { "Backward thrusters' power." } },
+  { name = "TURN_POWER", label = "Turning power", step = 1, min = 0, max = 15,
+    help = { "Turning thrusters' power. Lower it if", "the ship spins too fast." } },
   { name = "THRUST_RAMP", label = "Thrust spool-up", step = 5, min = 5, max = 200,
     help = { "How fast the thrusters spool up and", "down. Lower = gentler starts." } },
   { name = "CLIMB_SPEED", label = "Climb speed", step = 0.5, min = 0.5, max = 20,
@@ -849,7 +905,7 @@ local function tuning()
     print("")
     for _, line in ipairs(TUNE[sel].help) do print(line) end
     print("")
-    print("1-7 pick  +/- change  D default  Q back")
+    print("1-9 pick  +/- change  D default  Q back")
     print(liftLine())
     local timer = os.startTimer(0.5)
     local ev, a = os.pullEvent()
@@ -873,30 +929,34 @@ end
 local function thrusterSetup()
   if #thrusters == 0 then screen("Thruster setup") print("No thrusters found.") pause() return end
   local page, sel = 0, 1
+  local KEYROLE = { w = "forward", s = "back", a = "left", d = "right", u = "lift", o = "off" }
   while true do
     screen("Thruster setup")
     local first = page * 9
     for i = 1, 9 do
       local t = thrusters[first + i]
       if t then
-        print(string.format("%s%d %-22s %s", sel == first + i and ">" or " ", i, t.name, roleOf(t)))
+        print(string.format("%s%d %-20s %s", sel == first + i and ">" or " ", i, t.name, ROLE_LABEL[roleOf(t)] or roleOf(t)))
       end
     end
-    print("")
-    print("1-9 pick   L lift   F forward   O off")
-    print("A all lift   T test-fire picked (1 s)")
-    if #thrusters > 9 then print("N / B next / back page") end
+    print("1-9 pick, then set it:")
+    print(" W forward  S backward  A turn left")
+    print(" D turn right  U lift  O off")
+    print("T test-fire picked (1 s)   X all lift")
+    if #thrusters > 9 then
+      print(string.format("N / P next / previous page (%d of %d)", page + 1, math.ceil(#thrusters / 9)))
+    end
     print("Q back")
-    local ch = waitChar("123456789lfoatnbq")
+    local ch = waitChar("123456789wsaduotxnpq")
     local n = tonumber(ch)
     local t = thrusters[sel]
     if n and thrusters[first + n] then
       sel = first + n
-    elseif ch == "l" or ch == "f" or ch == "o" then
-      cfg.roles[t.name] = ch == "l" and "lift" or ch == "f" and "forward" or "off"
+    elseif KEYROLE[ch] then
+      cfg.roles[t.name] = KEYROLE[ch]
       saveConfig()
       log("thruster setup: %s = %s", t.name, cfg.roles[t.name])
-    elseif ch == "a" then
+    elseif ch == "x" then
       for _, x in ipairs(thrusters) do cfg.roles[x.name] = "lift" end
       saveConfig()
       log("thruster setup: all lift")
@@ -906,18 +966,16 @@ local function thrusterSetup()
       sleep(1)
       pcall(t.p.setPower, 0)
     elseif ch == "n" and (page + 1) * 9 < #thrusters then
-      page = page + 1
-    elseif ch == "b" and page > 0 then
-      page = page - 1
+      page, sel = page + 1, (page + 1) * 9 + 1
+    elseif ch == "p" and page > 0 then
+      page, sel = page - 1, (page - 1) * 9 + 1
     elseif ch == "q" then
-      -- Thrusters that changed role start from a clean state.
-      local before = {}
-      for _, x in ipairs(liftT) do before[x.name] = true end
+      -- Start everything from a clean state with the new roles.
+      for _, x in ipairs(thrusters) do pcall(x.p.setPower, 0) end
       sortThrusters()
-      liftSent, sentThrust = {}, nil
-      for _, x in ipairs(thrusters) do
-        if roleOf(x) ~= "lift" and before[x.name] then pcall(x.p.setPower, 0) end
-      end
+      liftSent, groupSent = {}, {}
+      groupPower = { forward = 0, back = 0, left = 0, right = 0 }
+      thrust = 0
       setShift(shift)
       return
     end
@@ -930,8 +988,10 @@ local function menu()
     print(string.format("Typewriter %s, %d relays%s", typewriter and "ok" or "MISSING", #relays, onSable and ", Sable ship" or ""))
     local unset = 0
     for _, t in ipairs(thrusters) do if roleOf(t) == "unset" then unset = unset + 1 end end
-    print(string.format("Thrusters: %d lift, %d forward%s%s", #liftT, #forwardT,
-      unset > 0 and (", " .. unset .. " NOT SET UP (P)") or "", transmission and ", transmission" or ""))
+    print(string.format("Thrusters: %d lift, %d fwd, %d back, %d+%d turn", #liftT, #group.forward,
+      #group.back, #group.left, #group.right))
+    if unset > 0 then print(unset .. " thruster(s) NOT SET UP - press P") end
+    if transmission then print("Lift transmission connected") end
     print("Hover level: " .. (cfg.hover and (cfg.hover .. "/256") or "not calibrated"))
     print(liftLine())
     print("")
@@ -941,7 +1001,7 @@ local function menu()
     print("G  Gearshift setup (turning/backward)")
     print("H  Hover calibration")
     print("U  Tuning")
-    print("P  Thruster setup (lift / forward)")
+    print("P  Thruster setup (lift/move/turn)")
     print("M  Manual test")
     if relayError then print("Relay error: " .. relayError) end
     local ch = waitChar("ftkghupm")
@@ -1023,7 +1083,7 @@ local ok, err = xpcall(function() parallel.waitForAny(liftLoop, ui, sampleLoop) 
 log("stopped: %s", ok and "ok" or tostring(err))
 if logFile then logFile.close() end
 -- Thrusters and turning off; the lift stays where it is so the ship doesn't drop.
-setThrusters(0)
+allThrustOff()
 applyMove(nil)
 term.clear()
 term.setCursorPos(1, 1)
