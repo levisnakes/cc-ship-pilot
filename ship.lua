@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "3.8.0"
+VERSION = "3.9.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -43,7 +43,7 @@ BACK_POWER = 15         -- most power the backward thrusters use (0-15); S follo
 TURN_POWER = 5          -- turning thrusters' power (0-15); also set on the Fly screen
 THRUST_RAMP = 30        -- how fast thrusters spool up and down (power per second)
 ALT_HOLD = true         -- hold height on a Sable ship (needs CC: Sable)
-CLIMB_SPEED = 4         -- blocks per second up or down while the key is held
+CLIMB_SPEED = 8         -- blocks per second up or down while the key is held
 LIFT_GAIN = 20          -- lift change per block/s of vertical speed error
 LIFT_LEARN = 8          -- how fast it fine-tunes the hover level
 -- Without altitude hold: how far up/down keys move the lift from the hover level.
@@ -220,6 +220,11 @@ local function loadConfig()
   if not cfg.turnPower36 then
     cfg.turnPower36 = true
     cfg.tune.TURN_POWER = 5
+  end
+  -- v3.9: climbing was too slow at 4 blocks/s; move the old default to 8 once.
+  if not cfg.climb39 then
+    cfg.climb39 = true
+    if cfg.tune.CLIMB_SPEED == nil or cfg.tune.CLIMB_SPEED == 4 then cfg.tune.CLIMB_SPEED = 8 end
   end
   for name, v in pairs(cfg.tune) do _ENV[name] = v end
 end

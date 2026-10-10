@@ -98,7 +98,7 @@ Open **U (Tuning)** on the computer, ideally while the ship hovers so you can se
 | Backward power | The most power reverse (S) uses; S follows the throttle up to this. |
 | Turning power | Turning thrusters' power; lower it if the ship spins too fast. |
 | Thrust spool-up | Lower for gentler starts and stops. |
-| Climb speed | Blocks per second up or down. |
+| Climb speed | Blocks per second up or down (default 8). If it can't reach it, the lift thrusters are maxed out. |
 | Lift response | Raise it if the ship sags or reacts slowly to up/down; lower it if it bounces up and down quickly. |
 | Hover learning | Lower it if the ship slowly bobs up and down; raise it if it drifts away from its height. |
 | Hover level | The lift level that hovers. Hover calibration (H) sets it, and so does flying. |
