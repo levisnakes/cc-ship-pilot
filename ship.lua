@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "3.2.0"
+VERSION = "3.3.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -1066,15 +1066,20 @@ local function fuelParts()
 end
 
 local function flyScreen()
-  if not typewriter then screen("Fly") print("No Linked Typewriter found.") pause() return end
+  if not typewriter then screen("Fly") out({ C.warn, " No Linked Typewriter found." }) pause() return end
   local last, timer = now(), os.startTimer(0.05)
-  -- The throttle starts at START_THROTTLE every time, and the arrow keys
-  -- move it one step per tap only: no repeating, so a key that looks stuck
-  -- down can't run it to 0.
+  -- The throttle starts at START_THROTTLE every time. The faster/slower
+  -- keys step it once per press: each key event counts once, and that key
+  -- is ignored until it's let go (key_up), so held keys, the typewriter's
+  -- duplicate events and a key that looks stuck can't run it away.
   FORWARD_POWER = clamp(math.floor(START_THROTTLE + 0.5), 0, 15)
   log("throttle starts at %d", FORWARD_POWER)
-  local throttleDir = 0
+  local latched = {}          -- key code -> true until its key_up
+  local throttleSeen = cfg.throttleKeysSeen == true
   local course = yaw          -- smart mode: the heading to hold
+  local brakeI = 0            -- smart braking: integral term
+  local braking = false
+  local frame = 0
   local function stepThrottle(dir)
     local v = clamp(math.floor(FORWARD_POWER + 0.5) + dir, 0, 15)
     if v ~= FORWARD_POWER then
@@ -1083,8 +1088,7 @@ local function flyScreen()
     end
   end
   while true do
-    local ev, a = os.pullEvent()
-    -- Throttle from the screen: - / + on the computer, or tap the bar.
+    local ev, a, b = os.pullEvent()
     if ev == "char" then
       local c = a:lower()
       if c == "q" then break
@@ -1094,23 +1098,37 @@ local function flyScreen()
         muteAlarm()
       elseif c == "m" then
         cfg.smartOn = not cfg.smartOn
-        course = yaw
+        course, brakeI = yaw, 0
         saveConfig()
         log("smart mode %s", cfg.smartOn and "on" or "off")
       end
     elseif ev == "throttle_set" and type(a) == "number" then
       FORWARD_POWER = clamp(a, 0, 15)
       log("throttle -> %d (tapped)", FORWARD_POWER)
+    elseif ev == "key" then
+      local dir = (a == keys[cfg.keys.faster] and 1) or (a == keys[cfg.keys.slower] and -1) or 0
+      if dir ~= 0 and not latched[a] then
+        latched[a] = now()
+        stepThrottle(dir)
+        if not throttleSeen then
+          throttleSeen = true
+          cfg.throttleKeysSeen = true
+          saveConfig()
+        end
+      end
+    elseif ev == "key_up" then
+      latched[a] = nil
     end
     if ev == "timer" and a == timer then
       local t = now()
       local dt = math.min(t - last, 0.5)
       last = t
-      local dir = (down("faster") and 1 or 0) - (down("slower") and 1 or 0)
-      if dir ~= throttleDir then
-        if dir ~= 0 then stepThrottle(dir) end
-        throttleDir = dir
+      frame = frame + 1
+      -- A latch whose key_up never came: clear it once the key isn't held.
+      for code, since in pairs(latched) do
+        if not twHeld[code] and t - since > 0.5 then latched[code] = nil end
       end
+
       -- Each thruster group spools toward its power while its key is held.
       local turnL = down("left") and not down("right")
       local turnR = down("right") and not down("left")
@@ -1120,20 +1138,47 @@ local function flyScreen()
         left = turnL and TURN_POWER or 0,
         right = turnR and TURN_POWER or 0,
       }
-      -- Any movement key takes over from the autopilot.
+      -- Any movement key takes over from the autopilot or a landing.
       local manual = down("forward") or down("back") or turnL or turnR or down("up") or down("down")
       if nav and manual then navStop("manual control") course = yaw end
       if landing and manual then landing = false log("landing cancelled by hand") end
-      -- Smart mode: hold the heading unless turning by hand. After a hand
-      -- turn it first stops the spin, then holds the new heading.
+
       if cfg.smartOn and smartReady() and not nav then
+        -- Heading hold: unless turning by hand. After a hand turn it first
+        -- stops the spin, then holds the new heading.
         if turnL or turnR then
           course = nil
         else
           if course == nil and math.abs(yawRate) < 0.05 then course = yaw end
           target.left, target.right = steerYaw(course)
         end
+        -- Smart braking: off the gas (neither forward nor back held), a PI
+        -- controller on the speed along the nose brings the ship to a stop.
+        braking = false
+        if navReady() and not down("forward") and not down("back") then
+          local ny = noseYaw()
+          local vAlong = vx * math.cos(ny) + vz * math.sin(ny)
+          if math.abs(vAlong) > 0.15 then
+            braking = true
+            local e = -vAlong
+            brakeI = clamp(brakeI + e * dt * 0.3, -2, 2)
+            local accel = 0.8 * e + brakeI          -- blocks/s^2 wanted
+            local backAcc = cfg.smart.back or 0
+            if accel < 0 and backAcc > 0.2 then
+              target.back = math.max(target.back, clamp(-accel / backAcc, 0, 1) * BACK_POWER)
+            elseif accel > 0 then
+              target.forward = math.max(target.forward, clamp(accel / cfg.smart.fwd, 0, 1) * 15)
+            end
+          else
+            brakeI = 0
+          end
+        else
+          brakeI = 0
+        end
+      else
+        braking = false
       end
+
       if not nav then
         local step = THRUST_RAMP * dt
         local want = {}
@@ -1143,79 +1188,85 @@ local function flyScreen()
         thrust = want.forward
         setGroups(want)
       end
-      -- turning wins over backward when both are held
+      -- Relay turning (older setups): turning wins over backward.
       local move = nil
-      if down("left") and not down("right") then move = "left"
-      elseif down("right") and not down("left") then move = "right"
-      elseif down("back") then move = "back" end
+      if turnL then move = "left" elseif turnR then move = "right" elseif down("back") then move = "back" end
       applyMove(move)
       local ud = (down("up") and 1 or 0) - (down("down") and 1 or 0)
       if ud ~= 0 or not landing then lift.updown = ud end
 
-      screen("Fly")
-      local names = {}
-      for _, act in ipairs(ACTIONS) do if down(act.id) then names[#names + 1] = act.label end end
-      local gp = function(g) return math.floor(groupPower[g] + 0.5) end
-      out(" Keys      ", #names > 0 and { C.key, table.concat(names, ", ") } or { C.dim, "none held" })
-      print("")
-      -- Throttle: [-] bar [+]; tap a cell to jump to that level.
-      local thr = math.floor(FORWARD_POWER + 0.5)
-      local _, ty = cursor()
-      ty = ty or 5
-      term.setCursorPos(2, ty) write("Throttle ") fg(C.key) write(string.format("%2d", thr)) fg(colors.white)
-      local cx = chip(14, ty, "-", "", { char = "-" })
-      for i = 1, 15 do
-        term.setCursorPos(cx + (i - 1) * 2, ty)
-        if COLOR then
-          bg(i <= thr and C.key or colors.gray) write(" ") bg(colors.black) write(" ")
-        else
-          write(i <= thr and "#" or "-") write(" ")
+      -- Draw 10 times a second (control runs at 20), so monitors don't flicker.
+      if frame % 2 == 0 then
+        screen("Fly")
+        local names = {}
+        for _, act in ipairs(ACTIONS) do if down(act.id) then names[#names + 1] = act.label end end
+        local gp = function(g) return math.floor(groupPower[g] + 0.5) end
+        out(" Keys      ", #names > 0 and { C.key, table.concat(names, ", ") } or { C.dim, "none held" })
+        -- Throttle: [-] bar [+]; tap a cell to jump to that level.
+        local thr = math.floor(FORWARD_POWER + 0.5)
+        local _, ty = cursor()
+        ty = ty or 4
+        term.setCursorPos(2, ty) write("Throttle ") fg(C.key) write(string.format("%2d", thr)) fg(colors.white)
+        local cx = chip(14, ty, "-", "", { char = "-" })
+        for i = 1, 15 do
+          term.setCursorPos(cx + (i - 1) * 2, ty)
+          if COLOR then
+            bg(i <= thr and C.key or colors.gray) write(" ") bg(colors.black) write(" ")
+          else
+            write(i <= thr and "#" or "-") write(" ")
+          end
+          buttons[#buttons + 1] = { x1 = cx + (i - 1) * 2, x2 = cx + (i - 1) * 2 + 1, y = ty, event = "throttle_set", value = i }
         end
-        buttons[#buttons + 1] = { x1 = cx + (i - 1) * 2, x2 = cx + (i - 1) * 2 + 1, y = ty, event = "throttle_set", value = i }
-      end
-      chip(cx + 30, ty, "+", "", { char = "+" })
-      term.setCursorPos(1, ty + 1)
-      out(" Forward   ", meter(gp("forward"), 15, 10), string.format(" %2d", gp("forward")),
-        "   Back    ", meter(gp("back"), 15, 10), string.format(" %2d", gp("back")))
-      out(" Turn L    ", meter(gp("left"), 15, 10), string.format(" %2d", gp("left")),
-        "   Turn R  ", meter(gp("right"), 15, 10), string.format(" %2d", gp("right")))
-      print("")
-      out(" Lift      ", meter(shift, 256, 11, C.head), string.format(" %3d/256  ", math.floor(shift + 0.5)),
-        { C.dim, lift.status })
-      if alt then
-        out(" Height    ", string.format("%.1f", alt), "   ",
-          { math.abs(vy) < 0.3 and C.good or C.warn, string.format("%+.1f b/s", vy) })
-      end
-      if #velSensors > 0 then out(" Speed     ", velText(), { C.dim, "  (sensor)" }) end
-      if #relays > 0 and currentMove then
-        out(" Relays    ", currentMove, { C.dim, " (" .. describe(cfg.moves[currentMove]) .. ")" })
-      end
-      if relayError then out({ C.bad, " Relay error: " .. relayError }) end
-      if fuelKnown() then
-        local fp = fuelParts()
-        out(" Fuel      ", table.unpack(fp))
-        if fuel.low then out({ C.bad, " LOW FUEL" }, { C.dim, LOW_FUEL_LAND > 0 and string.format(" - lands itself at %ds left", LOW_FUEL_LAND) or "" }) end
+        chip(cx + 30, ty, "+", "", { char = "+" })
+        term.setCursorPos(1, ty + 1)
+        out(" Forward   ", meter(gp("forward"), 15, 10), string.format(" %2d", gp("forward")),
+          "   Back    ", meter(gp("back"), 15, 10), string.format(" %2d", gp("back")))
+        out(" Turn L    ", meter(gp("left"), 15, 10), string.format(" %2d", gp("left")),
+          "   Turn R  ", meter(gp("right"), 15, 10), string.format(" %2d", gp("right")))
+        print("")
+        out(" Lift      ", meter(shift, 256, 11, C.head), string.format(" %3d/256  ", math.floor(shift + 0.5)),
+          { C.dim, lift.status })
+        if alt then
+          local hs = math.sqrt(vx * vx + vz * vz)
+          out(" Height    ", string.format("%.1f ", alt),
+            { math.abs(vy) < 0.3 and C.dim or C.warn, string.format("%+.1f", vy) },
+            string.format("   Speed %.1f b/s", hs),
+            yaw and string.format("   Heading %3d", math.floor(math.deg(noseYaw()) % 360 + 0.5)) or "")
+        end
+        if fuelKnown() then out(" Fuel      ", table.unpack(fuelParts())) end
+        print("")
+        -- Status messages, most important first; at most five.
+        local msgs = {}
         if fuelAlarm then
-          out(" ", { C.bad, "FUEL ALARM" }, { C.dim, string.format(" - lava below %d%%%s", FUEL_ALARM_PERCENT,
-            alarmMuted and " (muted)" or (speaker and "" or " (no speaker)")) })
+          msgs[#msgs + 1] = { { C.bad, " FUEL ALARM" }, { C.dim, string.format(" lava below %d%%%s", FUEL_ALARM_PERCENT,
+            alarmMuted and " (muted)" or (speaker and "" or " (no speaker)")) } }
         end
-      end
-      if landing then out(" ", { C.warn, "Landing" }, { C.dim, "  (any key takes over)" }) end
-      if nav then
-        out(" Autopilot ", { C.good, nav.status or "" }, { C.dim, "  (any key takes over)" })
-      elseif cfg.smartOn then
-        if not smartReady() then
-          out(" Smart     ", { C.warn, "needs Smart setup (menu)" })
-        elseif yaw then
-          out(" Smart     ", string.format("heading %3d", math.floor(math.deg(noseYaw()) % 360 + 0.5)),
-            { C.dim, course and string.format("  holding %3d", math.floor(math.deg(course + cfg.smart.offset) % 360 + 0.5))
-              or "  turning by hand" })
+        if fuel.low then
+          msgs[#msgs + 1] = { { C.bad, " LOW FUEL" }, { C.dim, LOW_FUEL_LAND > 0 and string.format(" - lands itself at %ds left", LOW_FUEL_LAND) or "" } }
         end
+        if landing then msgs[#msgs + 1] = { { C.warn, " Landing" }, { C.dim, "  (any movement key takes over)" } } end
+        if nav then
+          msgs[#msgs + 1] = { { C.good, " Autopilot " }, nav.status or "", { C.dim, "  (any key takes over)" } }
+        elseif cfg.smartOn then
+          if not smartReady() then
+            msgs[#msgs + 1] = { { C.warn, " Smart mode needs Smart setup (menu S)" } }
+          else
+            msgs[#msgs + 1] = { { C.good, " Smart" }, course and string.format("  holding heading %3d",
+              math.floor(math.deg(course + cfg.smart.offset) % 360 + 0.5)) or { C.dim, "  turning by hand" },
+              braking and { C.head, "   braking" } or "" }
+          end
+        end
+        if relayError then msgs[#msgs + 1] = { { C.bad, " Relay error: " .. relayError } } end
+        if not throttleSeen then
+          msgs[#msgs + 1] = { { C.dim, " Arrow keys: bind them to a link frequency on" } }
+          msgs[#msgs + 1] = { { C.dim, " the typewriter (sneak + right-click it)." } }
+        end
+        for i = 1, math.min(#msgs, 6) do out(table.unpack(msgs[i])) end
+        local items = { { "Q", "Menu", { char = "q" } }, { "-", "", { char = "-" } }, { "+", "", { char = "+" } },
+          { "M", cfg.smartOn and "Smart ON" or "Smart off", { char = "m" } } }
+        if fuelAlarm and not alarmMuted then items[#items + 1] = { "X", "Mute alarm", { char = "x" } } end
+        footer(items)
       end
-      local items = { { "Q", "Menu", { char = "q" } }, { "-", "", { char = "-" } }, { "+", "", { char = "+" } },
-        { "M", cfg.smartOn and "Smart ON" or "Smart off", { char = "m" } } }
-      if fuelAlarm and not alarmMuted then items[#items + 1] = { "X", "Mute alarm", { char = "x" } } end
-      footer(items)
       timer = os.startTimer(0.05)
     end
   end
@@ -1310,6 +1361,8 @@ end
 -- Switch relay sides by hand until the ship does what you want, then save
 -- that combination as turn left, turn right or backward.
 local function gearshiftSetup()
+  if nav then navStop("opened " .. "gearshiftSetup") end
+  landing = false
   if #relays == 0 then screen("Gearshift setup") print("No Redstone Relay found.") pause() return end
   local list = {}
   for _, r in ipairs(relays) do
@@ -1357,6 +1410,8 @@ local function gearshiftSetup()
 end
 
 local function hoverCalibration()
+  if nav then navStop("opened " .. "hoverCalibration") end
+  landing = false
   if not liftAvailable() then
     screen("Hover calibration")
     out({ C.warn, " Nothing to lift with." })
@@ -1445,6 +1500,8 @@ local function hoverCalibration()
 end
 
 local function manualTest()
+  if nav then navStop("opened " .. "manualTest") end
+  landing = false
   if #relays == 0 and #thrusters == 0 then screen("Manual test") print("No relays or thrusters found.") pause() return end
   local r = relays[1]
   local on = {}
@@ -1568,6 +1625,8 @@ end
 
 -- Mark each thruster as lift, forward or off.
 local function thrusterSetup()
+  if nav then navStop("opened " .. "thrusterSetup") end
+  landing = false
   if #thrusters == 0 then screen("Thruster setup") print("No thrusters found.") pause() return end
   local page, sel = 0, 1
   local KEYROLE = { w = "forward", s = "back", a = "left", d = "right", u = "lift", o = "off" }
@@ -1646,6 +1705,8 @@ end
 
 -- Fires the thrusters briefly to learn how they turn and push the ship.
 local function smartSetup()
+  if nav then navStop("opened " .. "smartSetup") end
+  landing = false
   screen("Smart setup")
   if not onSable or not yaw then
     out({ C.warn, " Needs the ship's position and heading (CC: Sable)." })
@@ -1931,8 +1992,7 @@ local function menu()
     local trouble = false
     for _, m in ipairs(machineInfo) do if m.over then trouble = true end end
     if fuelKnown() then
-      out(" ", { C.key, "Y" }, fuelAlarm and " " or " Fuel     ", fuelAlarm and { C.bad, "ALARM    " } or "",
-        table.unpack(fuelParts()))
+      out(" ", { C.key, "Y" }, " ", fuelAlarm and { C.bad, "ALARM   " } or "Fuel     ", table.unpack(fuelParts()))
     elseif #machineNames > 0 then
       out(" ", { C.key, "Y" }, " Systems  ", { C.dim, #machineNames .. " machines" })
     end

@@ -26,7 +26,9 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 | Left Shift | down (hold it on the ground to land and switch the lift off) |
 | ↑ / ↓ arrows | throttle: forward power 0-15, one step per tap. It starts at 5 every time you open Fly (Start throttle in Tuning). W fires at this power. You can also set it on the Fly screen: tap **[-]** / **[+]**, tap a cell of the throttle bar to jump to that level, or press - / + on the computer. |
 
-Change them in the **Keybinds** menu. The typewriter only passes on movement keys (WASD, Space, Shift) by itself; for the arrow keys, bind each to a Redstone Link frequency on the typewriter first (any spare frequency), then check them in **T (Typewriter test)**.
+Change them in the **Keybinds** menu.
+
+**Arrow keys need a binding.** The typewriter only sends a key to the computer if that key is bound to a Redstone Link frequency on the typewriter; WASD, Space and Shift come bound, the arrow keys don't. Sneak + right-click the typewriter to open its configuration screen and give ↑ and ↓ any frequency (they don't need to drive anything). Check them in **T (Typewriter test)**: they should show "From: typewriter". Until the program has seen them, the Fly screen reminds you. The throttle can always be set on the Fly screen too (tap [-] / [+] or the bar).
 
 ## Menu (on the computer)
 
@@ -52,6 +54,7 @@ Everything set up from the menus is saved in `ship.cfg`.
 Run **S (Smart setup)** once, hovering with some room around: the ship turns a little each way and moves forward and back a few blocks to learn how its thrusters turn and push it.
 
 - **Smart mode** (press **M** on the Fly screen, or the button there): while you fly, the computer holds your heading with the turning thrusters. Turn with A/D as usual; when you let go it stops the spin and holds the new heading.
+- **Smart braking** (part of smart mode): let go of W (and don't hold S) and a PI controller fires the backward thrusters to bring the ship to a smooth stop (or the forward thrusters if it's drifting backward). Hold W or S to take over.
 - **Go to (A in the menu)**: type or tap X, Z and optionally Y on the keypad (**Here** fills in where you are) and press **Go**. The ship climbs or sinks to Y, flies there, brakes and holds position. It keeps flying from the menu; any movement key on the typewriter takes over.
 - **Website**: [levisnakes.github.io/cc-ship-pilot](https://levisnakes.github.io/cc-ship-pilot/). The menu shows a website code; type it in to see the ship on a map and send it commands: go to coordinates (or click the map), hold here, cancel, land, smart mode on/off and throttle. Messages go through the free ntfy.sh relay (about 250 a day for the whole Minecraft server), so the ship sends an update every 5 seconds while moving and stops at 150 a day. Anyone with the code can control the ship; delete `ship_remote_id` for a new one.
 
