@@ -55,6 +55,12 @@ Run **S (Smart setup)** once, hovering with some room around: the ship turns a l
 - **Go to (A in the menu)**: type or tap X, Z and optionally Y on the keypad (**Here** fills in where you are) and press **Go**. The ship climbs or sinks to Y, flies there, brakes and holds position. It keeps flying from the menu; any movement key on the typewriter takes over.
 - **Website**: [levisnakes.github.io/cc-ship-pilot](https://levisnakes.github.io/cc-ship-pilot/). The menu shows a website code; type it in to see the ship on a map and send it commands: go to coordinates (or click the map), hold here, cancel, land, smart mode on/off and throttle. Messages go through the free ntfy.sh relay (about 250 a day for the whole Minecraft server), so the ship sends an update every 5 seconds while moving and stops at 150 a day. Anyone with the code can control the ship; delete `ship_remote_id` for a new one.
 
+## Fuel and systems
+
+If fluid tanks are connected (for example a lava tank, with Advanced Peripherals for its capacity), the menu and Fly screen show the fuel: how much lava, how fast it's burning and roughly how long is left. Tap the fuel line (or press **Y**) for the **Systems** screen: every tank, the fuel inside the thrusters, and every Create machine Create Avionics reports on (speed, and OVERSTRESSED or stopped in red/orange), so you can see if the lava production stops.
+
+With **LOW_FUEL_SECONDS** (30) of flying left it warns; at **LOW_FUEL_LAND** (15) it lands by itself so the ship comes down under control instead of falling (set it to 0 in `ship_settings.lua` to turn that off). Fuel also shows on the website.
+
 ## Log
 
 Everything is written to `ship.log` on the computer: the parts it found, your saved setup, every relay switch (and any error), typewriter keys, screens, take-offs and landings, and five times a second the lift, height, speeds and the Velocity Sensor reading. The run before is kept as `ship.log.old`. To share it:

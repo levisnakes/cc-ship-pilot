@@ -92,7 +92,7 @@
   <div class="stack">
     <section class="card">
       <h2>Status</h2>
-      <div><span class="chip" id="badge">—</span> <span class="chip" id="smartChip">smart —</span> <span class="chip" id="liveChip">offline</span></div>
+      <div><span class="chip" id="badge">—</span> <span class="chip" id="smartChip">smart —</span> <span class="chip" id="liveChip">offline</span> <span class="chip" id="fuelChip" style="display:none"></span></div>
       <div class="status" id="statusText">Waiting for the ship…</div>
       <div class="hint" id="subText" style="margin:0"></div>
       <div class="stats">
@@ -103,6 +103,8 @@
         <div class="stat"><span>To target</span><b id="sDist">—</b></div>
         <div class="stat"><span>Position</span><b id="sPos" style="font-size:14px">—</b></div>
         <div class="stat"><span>Throttle</span><b id="sThr">—</b></div>
+        <div class="stat"><span>Fuel (lava)</span><b id="sFuel" style="font-size:14px">—</b></div>
+        <div class="stat"><span>Fuel left</span><b id="sFuelLeft">—</b></div>
         <div class="stat"><span>Updates today</span><b id="sSent">—</b></div>
       </div>
     </section>
@@ -230,6 +232,12 @@
       $("sPos").textContent = t.p ? `${fmt(t.p[0])} ${fmt(t.p[1])} ${fmt(t.p[2])}` : "—";
       $("sThr").textContent = (t.thr ?? "—") + "/15";
       $("sSent").textContent = t.sent !== undefined ? `${t.sent} / ${t.limit}` : "—";
+      const f = t.fuel;
+      $("sFuel").textContent = f ? `${f.a} mB` + (f.c ? ` (${Math.round(f.a / f.c * 100)}%)` : "") : "—";
+      $("sFuelLeft").textContent = f ? (f.l !== undefined && f.l !== null ? (f.l >= 60 ? `${Math.floor(f.l / 60)}m ${f.l % 60}s` : `${f.l}s`) : (f.r < -0.5 ? "refilling" : "not burning")) : "—";
+      $("fuelChip").style.display = (f && f.low) || t.landing ? "" : "none";
+      $("fuelChip").className = "chip " + (f && f.low ? "warn" : "info");
+      $("fuelChip").textContent = f && f.low ? (t.landing ? "LOW FUEL - landing" : "LOW FUEL") : "landing";
       $("smartBtn").textContent = t.smart ? "Smart mode: ON" : "Smart mode: off";
       $("smartBtn").className = t.smart ? "on" : "";
       if (document.activeElement !== $("thr") && t.thr !== undefined) { $("thr").value = t.thr; $("thrVal").textContent = t.thr; }
@@ -319,7 +327,7 @@
     else if (!on && demo) { demo.stop(); demo = null; trail = []; last = null; $("linkText").textContent = "Not connected"; render(); }
   }
   function makeDemo() {
-    const s = { x: 0, y: 100, z: 0, vx: 0, vy: 0, vz: 0, hd: 30, smart: false, thr: 5, nav: null, land: false };
+    const s = { x: 0, y: 100, z: 0, vx: 0, vy: 0, vz: 0, hd: 30, smart: false, thr: 5, nav: null, land: false, fuel: 7200 };
     let samples = [], sent = 0, lastT = performance.now();
     const tick = () => {
       const now = performance.now(), dt = Math.min(.2, (now - lastT) / 1000); lastT = now;
@@ -337,6 +345,7 @@
       s.vy += (Math.max(-4, Math.min(4, (wantY - s.y) * .6)) - s.vy) * Math.min(1, dt * 2);
       s.x += s.vx * dt; s.y = Math.max(100, s.y + s.vy * dt); s.z += s.vz * dt;
       s.hd = (s.hd + 360) % 360;
+      if (s.y > 100.05) s.fuel = Math.max(0, s.fuel - dt * (20 + 4 * Math.hypot(s.vx, s.vz)));
       if (Math.hypot(s.vx, s.vz, s.vy) > .3) samples.push([now, +s.x.toFixed(1), +s.z.toFixed(1), +s.y.toFixed(1)]);
     };
     const report = () => {
@@ -346,6 +355,7 @@
         sent, limit: 150, ts: Date.now(), p: [+s.x.toFixed(1), +s.y.toFixed(1), +s.z.toFixed(1)],
         vel: [+s.vx.toFixed(1), +s.vy.toFixed(1), +s.vz.toFixed(1)], hd: Math.round(s.hd),
         nav: s.nav ? { mode: s.nav.mode, x: s.nav.x, y: s.nav.y, z: s.nav.z, s: s.nav.s } : undefined,
+        fuel: { a: Math.round(s.fuel), c: 8000, r: s.y > 100.05 ? 22 : 0, l: s.y > 100.05 ? Math.round(s.fuel / 22) : undefined, low: s.y > 100.05 && s.fuel / 22 < 30 },
         h: samples.map(p => [+((n - p[0]) / 1000).toFixed(2), p[1], p[2], p[3]]) }), Date.now());
       samples = [];
     };

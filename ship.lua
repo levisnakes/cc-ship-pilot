@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -51,6 +51,10 @@ MANUAL_LIFT_STEP = 40
 
 -- Smart mode and autopilot (need CC: Sable; run Smart setup once first).
 NAV_SPEED = 10          -- autopilot top speed (blocks per second)
+
+-- Fuel (lava in the fluid tanks and the thrusters).
+LOW_FUEL_SECONDS = 30   -- warn when this much flying time is left
+LOW_FUEL_LAND = 15      -- land by itself at this much time left (0 = never)
 NAV_ARRIVE = 2          -- autopilot: this close to the target counts as there
 TURN_RATE = 0.6         -- fastest the computer turns the ship (radians per second)
 
@@ -615,7 +619,7 @@ local function navLoop()
       if lift.mode == "off" then
         landing = false
         lift.updown = 0
-        log("website land: landed")
+        log("landing: landed")
       else
         lift.updown = -1
       end
@@ -690,6 +694,112 @@ local function navLoop()
       end
     end
     sleep(0.1)
+  end
+end
+
+-- ---------- fuel and ship systems ----------
+-- Fluid tanks (CC's fluid_storage; Advanced Peripherals adds the capacity),
+-- the fuel inside each thruster, and every Create machine Create Avionics
+-- reports on (speed, stress).
+
+local tankNames, machineNames = {}, {}
+for _, name in ipairs(peripheral.getNames()) do
+  local types = { peripheral.getType(name) }
+  local isTank, isMachine = false, false
+  for _, ty in ipairs(types) do
+    if ty == "fluid_storage" or ty == "fluid_tank" then isTank = true end
+  end
+  if not isTank and not THRUSTER_TYPES[types[1]] then
+    local p = peripheral.wrap(name)
+    if p and p.getSpeed and p.isOverstressed then isMachine = true end
+  end
+  if isTank then tankNames[#tankNames + 1] = name end
+  if isMachine then machineNames[#machineNames + 1] = name end
+end
+table.sort(tankNames)
+table.sort(machineNames)
+
+-- fuel = { tank = mB, cap = mB or nil, inThrusters = mB, rate = mB/s burned
+--          (negative while refilling), left = seconds or nil }
+local fuel = { tank = 0, cap = nil, inThrusters = 0, rate = 0, left = nil, low = false }
+local tankInfo, machineInfo = {}, {}
+local fuelHistory = {}
+
+local function isLava(name) return type(name) == "string" and name:find("lava") ~= nil end
+
+local function readFuel()
+  local total, cap, info = 0, 0, {}
+  for _, name in ipairs(tankNames) do
+    local amount, tcap, fluidName = 0, nil, nil
+    local ok, list = pcall(peripheral.call, name, "tanks")
+    if ok and type(list) == "table" then
+      for _, f in pairs(list) do
+        if type(f) == "table" and isLava(f.name) then amount = amount + (f.amount or 0) end
+        if type(f) == "table" and f.name and not fluidName then fluidName = f.name end
+      end
+    end
+    local ok2, i = pcall(peripheral.call, name, "info")
+    if ok2 and type(i) == "table" and tonumber(i.capacity) then tcap = tonumber(i.capacity) end
+    total = total + amount
+    if tcap then cap = cap + tcap end
+    info[#info + 1] = { name = name, amount = amount, cap = tcap, fluid = fluidName }
+  end
+  tankInfo = info
+  local inThr = 0
+  for _, t in ipairs(thrusters) do
+    local ok, mb = pcall(t.p.getFuelAmountMb)
+    if ok and type(mb) == "number" then inThr = inThr + mb end
+  end
+  fuel.tank, fuel.cap, fuel.inThrusters = total, cap > 0 and cap or nil, inThr
+  -- Burn rate over the last ~10 seconds.
+  local t = now()
+  fuelHistory[#fuelHistory + 1] = { t = t, v = total + inThr }
+  while #fuelHistory > 2 and t - fuelHistory[1].t > 10 do table.remove(fuelHistory, 1) end
+  local first = fuelHistory[1]
+  if t - first.t > 2 then
+    fuel.rate = (first.v - (total + inThr)) / (t - first.t)
+  end
+  fuel.left = fuel.rate > 0.5 and (total + inThr) / fuel.rate or nil
+
+  local mi = {}
+  for _, name in ipairs(machineNames) do
+    local ok, sp = pcall(peripheral.call, name, "getSpeed")
+    local ok2, over = pcall(peripheral.call, name, "isOverstressed")
+    mi[#mi + 1] = { name = name, speed = ok and sp or nil, over = ok2 and over == true }
+  end
+  machineInfo = mi
+end
+
+local function fuelKnown() return #tankNames > 0 end
+
+local function timeText(sec)
+  if not sec then return "-" end
+  if sec >= 3600 then return string.format("%dh %02dm", math.floor(sec / 3600), math.floor(sec % 3600 / 60)) end
+  if sec >= 60 then return string.format("%dm %02ds", math.floor(sec / 60), math.floor(sec % 60)) end
+  return string.format("%ds", math.floor(sec))
+end
+
+-- Reads fuel every second; warns, and lands before it runs dry.
+local function fuelLoop()
+  local warned = false
+  while true do
+    if fuelKnown() then
+      readFuel()
+      local flying = lift.mode == "fly"
+      fuel.low = flying and fuel.left ~= nil and fuel.left < LOW_FUEL_SECONDS
+      if fuel.low and not warned then
+        warned = true
+        log("LOW FUEL: %d mB, %.1f mB/s, about %s left", fuel.tank + fuel.inThrusters, fuel.rate, timeText(fuel.left))
+      elseif not fuel.low then
+        warned = false
+      end
+      if flying and LOW_FUEL_LAND > 0 and fuel.left and fuel.left < LOW_FUEL_LAND and not landing then
+        log("fuel nearly gone (%s left): landing", timeText(fuel.left))
+        navStop("low fuel")
+        landing = true
+      end
+    end
+    sleep(1)
   end
 end
 
@@ -905,6 +1015,20 @@ local function liftLine()
   return s
 end
 
+-- " Fuel   [#####----]  6.4k mB  -12 mB/s  8m 20s"
+local function fuelParts()
+  local amount = fuel.tank + fuel.inThrusters
+  local amt = amount >= 10000 and string.format("%.1fk mB", amount / 1000) or string.format("%d mB", amount)
+  local rate = fuel.rate > 0.5 and string.format("  -%.0f/s", fuel.rate) or (fuel.rate < -0.5 and string.format("  +%.0f/s", -fuel.rate) or "")
+  local col = fuel.low and C.bad or (fuel.cap and amount < fuel.cap * 0.2 and C.warn or C.good)
+  local parts = {}
+  if fuel.cap then parts[#parts + 1] = meter(amount, fuel.cap, 10, col) parts[#parts + 1] = " " end
+  parts[#parts + 1] = { col, amt }
+  parts[#parts + 1] = { C.dim, rate }
+  if fuel.left then parts[#parts + 1] = { fuel.low and C.bad or colors.white, "  " .. timeText(fuel.left) .. " left" } end
+  return parts
+end
+
 local function flyScreen()
   if not typewriter then screen("Fly") print("No Linked Typewriter found.") pause() return end
   local last, timer = now(), os.startTimer(0.05)
@@ -961,6 +1085,7 @@ local function flyScreen()
       -- Any movement key takes over from the autopilot.
       local manual = down("forward") or down("back") or turnL or turnR or down("up") or down("down")
       if nav and manual then navStop("manual control") course = yaw end
+      if landing and manual then landing = false log("landing cancelled by hand") end
       -- Smart mode: hold the heading unless turning by hand. After a hand
       -- turn it first stops the spin, then holds the new heading.
       if cfg.smartOn and smartReady() and not nav then
@@ -1028,6 +1153,12 @@ local function flyScreen()
         out(" Relays    ", currentMove, { C.dim, " (" .. describe(cfg.moves[currentMove]) .. ")" })
       end
       if relayError then out({ C.bad, " Relay error: " .. relayError }) end
+      if fuelKnown() then
+        local fp = fuelParts()
+        out(" Fuel      ", table.unpack(fp))
+        if fuel.low then out({ C.bad, " LOW FUEL" }, { C.dim, LOW_FUEL_LAND > 0 and string.format(" - lands itself at %ds left", LOW_FUEL_LAND) or "" }) end
+      end
+      if landing then out(" ", { C.warn, "Landing" }, { C.dim, "  (any key takes over)" }) end
       if nav then
         out(" Autopilot ", { C.good, nav.status or "" }, { C.dim, "  (any key takes over)" })
       elseif cfg.smartOn then
@@ -1692,6 +1823,46 @@ local function gotoScreen()
   end
 end
 
+-- Fuel tanks, fuel in the thrusters, and every Create machine's speed.
+local function systemsScreen()
+  while true do
+    screen("Systems")
+    if fuelKnown() then
+      heading(" Fuel")
+      for _, t in ipairs(tankInfo) do
+        local nm = t.name:gsub("^.*:", ""):gsub("_block_entity", ""):sub(1, 18)
+        out(string.format(" %-18s ", nm), t.cap and meter(t.amount, t.cap, 10, isLava(t.fluid) and C.good or C.warn) or "",
+          string.format(" %d", t.amount), t.cap and { C.dim, string.format("/%d mB", t.cap) } or { C.dim, " mB" },
+          (t.fluid and not isLava(t.fluid)) and { C.warn, "  " .. t.fluid } or "")
+      end
+      out(" in thrusters       ", string.format("%d mB", fuel.inThrusters))
+      out(" burn rate          ", fuel.rate > 0.5 and string.format("%.1f mB/s", fuel.rate)
+        or (fuel.rate < -0.5 and { C.good, string.format("refilling %.1f mB/s", -fuel.rate) } or { C.dim, "not burning" }),
+        fuel.left and { fuel.low and C.bad or colors.white, "   " .. timeText(fuel.left) .. " left" } or "")
+    else
+      hint(" No fluid tanks connected.")
+    end
+    if #machineInfo > 0 then
+      print("")
+      heading(" Machines")
+      for i, m in ipairs(machineInfo) do
+        if i > 7 then hint(string.format(" ... and %d more", #machineInfo - 7)) break end
+        local nm = m.name:gsub("^[^:]*:", ""):sub(1, 22)
+        local state
+        if m.over then state = { C.bad, "OVERSTRESSED" }
+        elseif not m.speed or math.abs(m.speed) < 0.01 then state = { C.warn, "stopped" }
+        else state = { C.good, string.format("%d rpm", math.floor(m.speed + 0.5)) } end
+        out(string.format(" %-22s ", nm), state)
+      end
+    end
+    footer({ { "Q", "Back", { char = "q" } } })
+    local timer = os.startTimer(1)
+    local ev, a = os.pullEvent()
+    os.cancelTimer(timer)
+    if ev == "char" and a:lower() == "q" then return end
+  end
+end
+
 local function menu()
   while true do
     screen("Menu")
@@ -1710,6 +1881,13 @@ local function menu()
       transmission and { C.dim, "   (lift transmission)" } or "")
     out(" Lift       ", meter(shift, 256, 14, C.head), " ", { C.dim, lift.status },
       alt and { C.dim, string.format("  y %.1f", alt) } or "")
+    local trouble = false
+    for _, m in ipairs(machineInfo) do if m.over then trouble = true end end
+    if fuelKnown() then
+      out(" ", { C.key, "Y" }, " Fuel     ", table.unpack(fuelParts()))
+    elseif #machineNames > 0 then
+      out(" ", { C.key, "Y" }, " Systems  ", { C.dim, #machineNames .. " machines" })
+    end
 
     local L, R, w = 2, 27, 24
     tile(L, 8, w, "F", "Fly", "fly with typewriter")
@@ -1731,10 +1909,11 @@ local function menu()
     if relayError then
       fg(C.bad) write(("Relay error: " .. relayError):sub(1, W - 2)) fg(colors.white)
     end
-    local ch = waitChar("ftkghupmas")
+    local ch = waitChar("ftkghupmasy")
     if ch == "f" then flyScreen()
     elseif ch == "a" then if nav then autopilotScreen() else gotoScreen() end
     elseif ch == "s" then smartSetup()
+    elseif ch == "y" then systemsScreen()
     elseif ch == "t" then typewriterTest()
     elseif ch == "k" then keybinds()
     elseif ch == "g" then gearshiftSetup()
@@ -1801,6 +1980,11 @@ local function telemetry()
     t.vel = { r1(vx), r1(vy), r1(vz) }
   end
   if yaw then t.hd = math.floor(math.deg(noseYaw()) % 360 + 0.5) end
+  if fuelKnown() then
+    t.fuel = { a = fuel.tank + fuel.inThrusters, c = fuel.cap, r = r1(fuel.rate),
+      l = fuel.left and math.floor(fuel.left) or nil, low = fuel.low }
+  end
+  if landing then t.landing = true end
   if nav then t.nav = { mode = nav.mode, x = nav.x, y = nav.y, z = nav.z, s = nav.status } end
   local h, nowT = {}, now()
   for i, smp in ipairs(trail) do h[i] = { math.floor((nowT - smp.t) * 100 + 0.5) / 100, smp.x, smp.z, smp.y } end
@@ -2020,6 +2204,8 @@ log("Ship Pilot v%s", VERSION)
 for _, name in ipairs(peripheral.getNames()) do log("peripheral %s: %s", name, tostring(peripheral.getType(name))) end
 for _, v in ipairs(velSensors) do log("velocity sensor %s axis %s", v.name, tostring(v.axis)) end
 for _, t in ipairs(thrusters) do log("thruster %s role %s", t.name, roleText(t)) end
+for _, n in ipairs(tankNames) do log("fuel tank %s", n) end
+for _, n in ipairs(machineNames) do log("machine %s", n) end
 log("Sable: %s  transmission start level: %d  lift mode: %s", tostring(onSable), math.floor(shift + 0.5), lift.mode)
 log("config: %s", textutils.serialize(cfg):gsub("%s+", " "))
 log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_GAIN=%s LIFT_LEARN=%s MANUAL_LIFT_STEP=%s",
@@ -2029,7 +2215,7 @@ log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_G
 pcall(mirrorToMonitor)
 REMOTE = REMOTE and http ~= nil and http.websocket ~= nil
 if REMOTE then remoteId = loadRemoteId() log("website code %s", remoteId) end
-local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop }
+local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop, fuelLoop }
 if REMOTE then loops[#loops + 1] = remoteLoop loops[#loops + 1] = telemetryLoop end
 local ok, err = xpcall(function() parallel.waitForAny(table.unpack(loops)) end, debug.traceback)
 log("stopped: %s", ok and "ok" or tostring(err))
