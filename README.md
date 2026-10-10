@@ -41,9 +41,19 @@ Everything on screen can be **tapped**: click a key letter or its label on an ad
 | H | Hover calibration: holds a height 3 blocks above where it is and saves the lift level once it has been steady for 5 seconds. It also keeps fine-tuning that level while you fly. |
 | U | Tuning: change flight settings with + and -, live, each with a short explanation (see below). |
 | P | Thruster setup: pick a thruster (1-9, N/P for more pages) and switch its jobs on or off: **W** forward, **S** backward, **A** turn left, **D** turn right; or **U** lift, **O** off. A thruster can have several movement jobs, for example turn left *and* backward, and fires at the strongest one in use. X marks them all as lift; T test-fires the picked one for a second so you can see which it is. |
+| A | Go to: autopilot to coordinates (needs Smart setup). |
+| S | Smart setup: learns how the thrusters turn and push the ship. |
 | M | Manual test: switch relay sides, the thrusters and the lift by hand. |
 
 Everything set up from the menus is saved in `ship.cfg`.
+
+## Smart mode, autopilot and website
+
+Run **S (Smart setup)** once, hovering with some room around: the ship turns a little each way and moves forward and back a few blocks to learn how its thrusters turn and push it.
+
+- **Smart mode** (press **M** on the Fly screen, or the button there): while you fly, the computer holds your heading with the turning thrusters. Turn with A/D as usual; when you let go it stops the spin and holds the new heading.
+- **Go to (A in the menu)**: type or tap X, Z and optionally Y on the keypad (**Here** fills in where you are) and press **Go**. The ship climbs or sinks to Y, flies there, brakes and holds position. It keeps flying from the menu; any movement key on the typewriter takes over.
+- **Website**: [levisnakes.github.io/cc-ship-pilot](https://levisnakes.github.io/cc-ship-pilot/). The menu shows a website code; type it in to see the ship on a map and send it commands: go to coordinates (or click the map), hold here, cancel, land, smart mode on/off and throttle. Messages go through the free ntfy.sh relay (about 250 a day for the whole Minecraft server), so the ship sends an update every 5 seconds while moving and stops at 150 a day. Anyone with the code can control the ship; delete `ship_remote_id` for a new one.
 
 ## Log
 

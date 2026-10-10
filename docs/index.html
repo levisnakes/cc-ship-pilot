@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ship Pilot</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --panel2: #1e232b; --line: #2a313b;
+    --text: #e6e9ee; --dim: #8b95a3; --accent: #4da3ff; --good: #3ecf8e;
+    --warn: #f5b942; --bad: #ff5d5d; --ship: #4da3ff; --target: #ff5d5d;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f3f5f8; --panel: #ffffff; --panel2: #f0f2f5; --line: #d9dee5;
+      --text: #1b2028; --dim: #5f6b7a; --accent: #1f6fd1; --good: #12895a;
+      --warn: #a86b00; --bad: #c62828; --ship: #1f6fd1; --target: #c62828;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 10px; font-weight: 600; }
+  .pair { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; min-width: 0; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  input[type=range] { padding: 0; width: 100%; accent-color: var(--accent); }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font: inherit; font-weight: 600; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.on { background: var(--good); border-color: var(--good); color: #fff; }
+  button.danger { background: transparent; border-color: var(--bad); color: var(--bad); }
+  main { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr); gap: 16px; padding: 16px; max-width: 1300px; margin: 0 auto; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .stack { display: grid; gap: 16px; align-content: start; }
+  #map { width: 100%; aspect-ratio: 4 / 3; display: block; border-radius: 8px; background: var(--panel2); cursor: crosshair; touch-action: manipulation; }
+  .hint { color: var(--dim); font-size: 13px; margin-top: 8px; }
+  .chip { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .04em; background: var(--panel2); border: 1px solid var(--line); }
+  .chip.good { color: var(--good); border-color: var(--good); }
+  .chip.warn { color: var(--warn); border-color: var(--warn); }
+  .chip.info { color: var(--accent); border-color: var(--accent); }
+  .status { font-size: 17px; font-weight: 600; margin: 8px 0 2px; min-height: 1.4em; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; margin-top: 12px; }
+  .stat { background: var(--panel2); border-radius: 8px; padding: 8px 10px; }
+  .stat b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--dim); font-size: 12px; }
+  .coords { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+  .coords label { font-size: 12px; color: var(--dim); display: grid; gap: 4px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .row button { flex: 1 1 110px; }
+  .sep { height: 1px; background: var(--line); margin: 14px 0; }
+  .thr { display: flex; align-items: center; gap: 10px; }
+  .thr b { min-width: 3ch; text-align: right; font-variant-numeric: tabular-nums; }
+  #log { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; font-size: 13px; }
+  #log li { padding: 4px 0; border-bottom: 1px solid var(--line); color: var(--dim); }
+  #log li b { color: var(--text); font-weight: 600; }
+  .demo { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 13px; }
+  footer { max-width: 1300px; margin: 0 auto; padding: 0 16px 24px; color: var(--dim); font-size: 13px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Ship Pilot</h1>
+    <div class="hint" id="linkText" style="margin:0">Not connected</div>
+  </div>
+  <div class="pair">
+    <input id="code" placeholder="Website code from the ship's menu" maxlength="16" autocomplete="off" spellcheck="false" style="width: 240px">
+    <button class="primary" id="connectBtn">Connect</button>
+    <label class="demo"><input type="checkbox" id="demo"> Demo</label>
+  </div>
+</header>
+
+<main>
+  <div class="stack">
+    <section class="card">
+      <h2>Map (top-down, north up)</h2>
+      <canvas id="map" width="900" height="675" aria-label="Top-down map of the ship and its target"></canvas>
+      <div class="hint">Click the map to pick a target. <span style="color:var(--ship)">&#9650;</span> ship (pointing where its nose points) &nbsp;<span style="color:var(--target)">&#10005;</span> autopilot target &nbsp;<span style="color:var(--accent)">&#9711;</span> picked, not sent</div>
+    </section>
+    <section class="card">
+      <h2>Activity</h2>
+      <ul id="log"></ul>
+    </section>
+  </div>
+
+  <div class="stack">
+    <section class="card">
+      <h2>Status</h2>
+      <div><span class="chip" id="badge">—</span> <span class="chip" id="smartChip">smart —</span> <span class="chip" id="liveChip">offline</span></div>
+      <div class="status" id="statusText">Waiting for the ship…</div>
+      <div class="hint" id="subText" style="margin:0"></div>
+      <div class="stats">
+        <div class="stat"><span>Height (Y)</span><b id="sY">—</b></div>
+        <div class="stat"><span>Speed</span><b id="sSpeed">—</b></div>
+        <div class="stat"><span>Heading</span><b id="sHead">—</b></div>
+        <div class="stat"><span>Vertical</span><b id="sVy">—</b></div>
+        <div class="stat"><span>To target</span><b id="sDist">—</b></div>
+        <div class="stat"><span>Position</span><b id="sPos" style="font-size:14px">—</b></div>
+        <div class="stat"><span>Throttle</span><b id="sThr">—</b></div>
+        <div class="stat"><span>Updates today</span><b id="sSent">—</b></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Autopilot</h2>
+      <div class="coords">
+        <label>X <input id="tx" inputmode="numeric"></label>
+        <label>Y (optional) <input id="ty" inputmode="numeric" placeholder="keep"></label>
+        <label>Z <input id="tz" inputmode="numeric"></label>
+      </div>
+      <div class="row">
+        <button class="primary" id="gotoBtn">Go</button>
+        <button id="holdBtn">Hold here</button>
+        <button id="cancelBtn">Cancel</button>
+      </div>
+      <div class="sep"></div>
+      <h2>Flying</h2>
+      <div class="row" style="margin-bottom:12px">
+        <button id="smartBtn">Smart mode</button>
+        <button id="landBtn">Land</button>
+        <button id="pingBtn">Refresh</button>
+      </div>
+      <div class="thr"><span>Throttle</span><input type="range" id="thr" min="0" max="15" step="1" value="5"><b id="thrVal">5</b></div>
+      <p class="hint">Smart mode holds the ship's heading while flying with the typewriter. The autopilot needs Smart setup done once on the ship. Any movement key on the typewriter takes over from the autopilot.</p>
+    </section>
+  </div>
+</main>
+
+<footer>
+  Messages go through the free <a href="https://ntfy.sh">ntfy.sh</a> relay, which allows the Minecraft server about 250 messages a day, so the ship sends an update every 5 seconds while moving (with its path in between) and on changes otherwise.
+  Anyone with the code can control the ship. Code: <a href="https://github.com/levisnakes/cc-ship-pilot">github.com/levisnakes/cc-ship-pilot</a>
+</footer>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const RELAY = "https://ntfy.sh/";
+  let code = "", ws = null, last = null, lastAt = 0, trail = [], demo = null, reconnectTimer = null;
+  const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } },
+                  set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+
+  function note(msg, strong) {
+    const li = document.createElement("li");
+    li.append(new Date().toLocaleTimeString() + " — ");
+    if (strong) { const b = document.createElement("b"); b.textContent = msg; li.append(b); } else li.append(msg);
+    $("log").prepend(li);
+    while ($("log").children.length > 80) $("log").lastChild.remove();
+  }
+
+  // ---------- link ----------
+  const topic = kind => `shippilot-${code}-${kind}`;
+  function disconnect() { clearTimeout(reconnectTimer); if (ws) { ws.onclose = null; ws.close(); ws = null; } }
+
+  async function connect() {
+    disconnect();
+    code = $("code").value.trim().toLowerCase();
+    if (!/^[a-z0-9]{4,16}$/.test(code)) { note("Enter the website code from the ship's menu.", true); return; }
+    store.set("shippilot-code", code);
+    trail = []; last = null; lastAt = 0;
+    $("linkText").textContent = "Connecting…";
+    try {
+      const r = await fetch(`${RELAY}${topic("tel")}/json?poll=1&since=12h`);
+      const lines = (await r.text()).split("\n").filter(Boolean);
+      for (const line of lines) { const ev = JSON.parse(line); if (ev.event === "message") receive(ev.message, ev.time * 1000, true); }
+      if (lines.length) note(`Loaded ${lines.length} earlier update${lines.length === 1 ? "" : "s"}.`);
+    } catch { note("Couldn't load history from ntfy.sh."); }
+    ws = new WebSocket(`wss://ntfy.sh/${topic("tel")}/ws`);
+    ws.onopen = () => { $("linkText").textContent = `Listening for ship ${code}`; note(`Connected to ship ${code}.`, true); send("ping", {}, true); };
+    ws.onmessage = e => { const ev = JSON.parse(e.data); if (ev.event === "message") receive(ev.message, Date.now()); };
+    ws.onclose = () => { $("linkText").textContent = "Link dropped, reconnecting…"; reconnectTimer = setTimeout(connect, 4000); };
+  }
+
+  const LABEL = { goto: "Go to", hold: "Hold here", cancel: "Cancel autopilot", land: "Land", smart: "Smart mode",
+    throttle: "Throttle", ping: "Refresh" };
+  async function send(c, extra = {}, quiet = false) {
+    const text = (LABEL[c] || c) + (extra.x !== undefined ? ` → ${extra.x} ${extra.y ?? "(keep)"} ${extra.z}` : "")
+      + (extra.on !== undefined ? (extra.on ? " on" : " off") : "") + (extra.v !== undefined ? ` ${extra.v}` : "");
+    if (demo) { demo.command({ c, ...extra }); if (!quiet) note(`Sent: ${text}`, true); return; }
+    if (!code) { note("Connect to a ship first.", true); return; }
+    try {
+      const r = await fetch(RELAY + topic("cmd"), { method: "POST", body: JSON.stringify({ c, ts: Date.now(), ...extra }) });
+      if (!r.ok) throw new Error(r.status);
+      if (!quiet) note(`Sent: ${text}`, true);
+    } catch (e) { note(`Couldn't send (${e.message}).`, true); }
+  }
+
+  function receive(text, at) {
+    let t; try { t = JSON.parse(text); } catch { return; }
+    if (!t || !t.v) return;
+    const prevNav = last && last.nav && last.nav.mode;
+    last = t; lastAt = t.ts || at;
+    for (const h of t.h || []) {
+      const p = { x: h[1], z: h[2] }, prev = trail[trail.length - 1];
+      if (!prev || Math.hypot(prev.x - p.x, prev.z - p.z) > 0.3) trail.push(p);
+    }
+    if (t.p) { const p = { x: t.p[0], z: t.p[2] }, prev = trail[trail.length - 1];
+      if (!prev || Math.hypot(prev.x - p.x, prev.z - p.z) > 0.3) trail.push(p); }
+    while (trail.length > 3000) trail.shift();
+    const navMode = t.nav && t.nav.mode;
+    if (prevNav !== navMode && last) note(navMode ? `Autopilot: ${navMode}` : "Autopilot off");
+    render();
+  }
+
+  // ---------- render ----------
+  const fmt = (v, d = 0) => (v === undefined || v === null) ? "—" : Number(v).toFixed(d);
+  function render() {
+    const t = last, age = lastAt ? (Date.now() - lastAt) / 1000 : Infinity;
+    const live = $("liveChip");
+    if (!t) { live.className = "chip"; live.textContent = "offline"; }
+    else if (age < 20) { live.className = "chip good"; live.textContent = `live · ${Math.max(0, age).toFixed(0)}s ago`; }
+    else { live.className = "chip warn"; live.textContent = `last heard ${age < 120 ? age.toFixed(0) + "s" : Math.round(age / 60) + " min"} ago`; }
+    if (t) {
+      $("badge").textContent = t.b || "—";
+      $("badge").className = "chip " + ({ HOVER: "good", CLIMB: "info", DESCEND: "warn" }[t.b] || "");
+      $("smartChip").textContent = t.smart ? (t.ready ? "smart ON" : "smart ON (needs setup)") : "smart off";
+      $("smartChip").className = "chip " + (t.smart ? (t.ready ? "good" : "warn") : "");
+      $("statusText").textContent = t.nav ? `Autopilot: ${t.nav.s || t.nav.mode}` : `Lift: ${t.ls || "—"}`;
+      $("subText").textContent = `On the ${t.m} screen · software v${t.v}` + (t.ready ? "" : " · run Smart setup for the autopilot");
+      $("sY").textContent = t.p ? fmt(t.p[1], 1) : "—";
+      $("sSpeed").textContent = t.vel ? fmt(Math.hypot(t.vel[0], t.vel[2]), 1) + " b/s" : "—";
+      $("sVy").textContent = t.vel ? (t.vel[1] >= 0 ? "+" : "") + fmt(t.vel[1], 1) : "—";
+      $("sHead").textContent = t.hd !== undefined ? t.hd + "°" : "—";
+      $("sDist").textContent = (t.p && t.nav) ? fmt(Math.hypot(t.nav.x - t.p[0], t.nav.z - t.p[2])) + " b" : "—";
+      $("sPos").textContent = t.p ? `${fmt(t.p[0])} ${fmt(t.p[1])} ${fmt(t.p[2])}` : "—";
+      $("sThr").textContent = (t.thr ?? "—") + "/15";
+      $("sSent").textContent = t.sent !== undefined ? `${t.sent} / ${t.limit}` : "—";
+      $("smartBtn").textContent = t.smart ? "Smart mode: ON" : "Smart mode: off";
+      $("smartBtn").className = t.smart ? "on" : "";
+      if (document.activeElement !== $("thr") && t.thr !== undefined) { $("thr").value = t.thr; $("thrVal").textContent = t.thr; }
+    }
+    const linked = !!(ws || demo);
+    for (const id of ["gotoBtn", "holdBtn", "smartBtn", "landBtn", "pingBtn", "thr"]) $(id).disabled = !linked;
+    $("cancelBtn").disabled = !linked || !(t && t.nav);
+    drawMap();
+  }
+
+  // ---------- map ----------
+  const cv = $("map"), cx = cv.getContext("2d");
+  let view = null;
+  const picked = () => { const x = parseFloat($("tx").value), z = parseFloat($("tz").value); return isFinite(x) && isFinite(z) ? { x, z } : null; };
+  function drawMap() {
+    const css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
+    const W = cv.width, H = cv.height, t = last;
+    cx.clearRect(0, 0, W, H);
+    const tgt = t && t.nav ? { x: t.nav.x, z: t.nav.z } : null;
+    let pk = picked(); if (pk && tgt && Math.hypot(pk.x - tgt.x, pk.z - tgt.z) < 1) pk = null;
+    const pts = [...trail];
+    if (t && t.p) pts.push({ x: t.p[0], z: t.p[2] });
+    if (tgt) pts.push(tgt); if (pk) pts.push(pk);
+    if (!pts.length) pts.push({ x: 0, z: 0 });
+    const minX = Math.min(...pts.map(p => p.x)), maxX = Math.max(...pts.map(p => p.x));
+    const minZ = Math.min(...pts.map(p => p.z)), maxZ = Math.max(...pts.map(p => p.z));
+    const span = Math.max(maxX - minX, maxZ - minZ, 40) * 1.25, midX = (minX + maxX) / 2, midZ = (minZ + maxZ) / 2;
+    const scale = Math.min(W, H) / span; view = { midX, midZ, scale, W, H };
+    const toC = p => [W / 2 + (p.x - midX) * scale, H / 2 + (p.z - midZ) * scale];
+    const step = [5, 10, 20, 50, 100, 200, 500, 1000].find(s => s * scale > 60) || 2000;
+    cx.strokeStyle = col("--line"); cx.lineWidth = 1; cx.fillStyle = col("--dim"); cx.font = "20px system-ui";
+    for (let x = Math.floor((midX - W / 2 / scale) / step) * step; x <= midX + W / 2 / scale; x += step) {
+      const [px] = toC({ x, z: 0 }); cx.beginPath(); cx.moveTo(px, 0); cx.lineTo(px, H); cx.stroke(); cx.fillText(x, px + 4, H - 8); }
+    for (let z = Math.floor((midZ - H / 2 / scale) / step) * step; z <= midZ + H / 2 / scale; z += step) {
+      const [, pz] = toC({ x: 0, z }); cx.beginPath(); cx.moveTo(0, pz); cx.lineTo(W, pz); cx.stroke(); cx.fillText(z, 6, pz - 6); }
+    if (trail.length > 1) {
+      cx.strokeStyle = col("--ship"); cx.globalAlpha = .45; cx.lineWidth = 3; cx.beginPath();
+      trail.forEach((p, i) => { const [a, b] = toC(p); i ? cx.lineTo(a, b) : cx.moveTo(a, b); }); cx.stroke(); cx.globalAlpha = 1; }
+    if (pk) { const [a, b] = toC(pk); cx.strokeStyle = col("--accent"); cx.lineWidth = 3; cx.setLineDash([6, 6]);
+      cx.beginPath(); cx.arc(a, b, 14, 0, Math.PI * 2); cx.stroke(); cx.setLineDash([]); }
+    if (tgt) {
+      const [a, b] = toC(tgt); cx.strokeStyle = col("--target"); cx.lineWidth = 4;
+      cx.beginPath(); cx.moveTo(a - 12, b - 12); cx.lineTo(a + 12, b + 12); cx.moveTo(a + 12, b - 12); cx.lineTo(a - 12, b + 12); cx.stroke();
+      if (t && t.p) { const [c, d] = toC({ x: t.p[0], z: t.p[2] }); cx.setLineDash([8, 8]); cx.lineWidth = 2;
+        cx.beginPath(); cx.moveTo(c, d); cx.lineTo(a, b); cx.stroke(); cx.setLineDash([]); }
+    }
+    if (t && t.p) {
+      const [a, b] = toC({ x: t.p[0], z: t.p[2] });
+      const ang = t.hd !== undefined ? t.hd * Math.PI / 180 : -Math.PI / 2;   // 0° = +X (east), 90° = +Z (south)
+      cx.save(); cx.translate(a, b); cx.rotate(ang); cx.fillStyle = col("--ship");
+      cx.beginPath(); cx.moveTo(18, 0); cx.lineTo(-11, 11); cx.lineTo(-5, 0); cx.lineTo(-11, -11); cx.closePath(); cx.fill(); cx.restore();
+    }
+    cx.fillStyle = col("--dim"); cx.fillText("N ↑", W - 50, 28);
+  }
+  cv.addEventListener("click", e => {
+    if (!view) return;
+    const r = cv.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width * view.W, pz = (e.clientY - r.top) / r.height * view.H;
+    $("tx").value = Math.round(view.midX + (px - view.W / 2) / view.scale);
+    $("tz").value = Math.round(view.midZ + (pz - view.H / 2) / view.scale);
+    drawMap();
+  });
+  for (const id of ["tx", "ty", "tz"]) $(id).addEventListener("input", drawMap);
+
+  // ---------- controls ----------
+  $("connectBtn").onclick = () => { setDemo(false); connect(); };
+  $("code").addEventListener("keydown", e => { if (e.key === "Enter") $("connectBtn").click(); });
+  $("gotoBtn").onclick = () => {
+    const x = parseFloat($("tx").value), z = parseFloat($("tz").value), yv = $("ty").value.trim(), y = yv === "" ? undefined : parseFloat(yv);
+    if (!isFinite(x) || !isFinite(z) || (y !== undefined && !isFinite(y))) { note("Fill in X and Z (click the map), Y is optional.", true); return; }
+    send("goto", { x, y, z });
+  };
+  $("holdBtn").onclick = () => send("hold");
+  $("cancelBtn").onclick = () => send("cancel");
+  $("landBtn").onclick = () => { if (confirm("Land the ship where it is?")) send("land"); };
+  $("pingBtn").onclick = () => send("ping");
+  $("smartBtn").onclick = () => send("smart", { on: !(last && last.smart) });
+  $("thr").oninput = () => { $("thrVal").textContent = $("thr").value; };
+  $("thr").onchange = () => send("throttle", { v: Number($("thr").value) });
+  $("demo").onchange = e => setDemo(e.target.checked);
+
+  // ---------- demo: a pretend ship, no network ----------
+  function setDemo(on) {
+    $("demo").checked = on;
+    if (on && !demo) { disconnect(); trail = []; last = null; demo = makeDemo(); demo.report();
+      $("linkText").textContent = "Demo ship (nothing is sent anywhere)"; note("Demo mode: a pretend ship you can control from this page.", true); }
+    else if (!on && demo) { demo.stop(); demo = null; trail = []; last = null; $("linkText").textContent = "Not connected"; render(); }
+  }
+  function makeDemo() {
+    const s = { x: 0, y: 100, z: 0, vx: 0, vy: 0, vz: 0, hd: 30, smart: false, thr: 5, nav: null, land: false };
+    let samples = [], sent = 0, lastT = performance.now();
+    const tick = () => {
+      const now = performance.now(), dt = Math.min(.2, (now - lastT) / 1000); lastT = now;
+      let wantY = s.y;
+      if (s.nav) {
+        wantY = s.nav.y ?? (s.y < 110 ? 115 : s.y);
+        const dx = s.nav.x - s.x, dz = s.nav.z - s.z, d = Math.hypot(dx, dz);
+        const sp = Math.min(10, Math.sqrt(2 * .8 * d), .4 * d);
+        const want = d > .1 ? { x: dx / d * sp, z: dz / d * sp } : { x: 0, z: 0 };
+        s.vx += (want.x - s.vx) * Math.min(1, dt * 1.2); s.vz += (want.z - s.vz) * Math.min(1, dt * 1.2);
+        if (d > 2) { const h = Math.atan2(dz, dx) * 180 / Math.PI; let e = ((h - s.hd + 540) % 360) - 180; s.hd += Math.max(-35 * dt, Math.min(35 * dt, e)); }
+        s.nav.s = d < 2 && Math.hypot(s.vx, s.vz) < .5 ? (s.nav.mode = "hold", "arrived - holding here") : `${d.toFixed(0)} blocks to go, ${Math.hypot(s.vx, s.vz).toFixed(1)} b/s`;
+      } else { s.vx *= 1 - dt; s.vz *= 1 - dt; }
+      if (s.land) { wantY = 100; if (s.y < 100.2) s.land = false; }
+      s.vy += (Math.max(-4, Math.min(4, (wantY - s.y) * .6)) - s.vy) * Math.min(1, dt * 2);
+      s.x += s.vx * dt; s.y = Math.max(100, s.y + s.vy * dt); s.z += s.vz * dt;
+      s.hd = (s.hd + 360) % 360;
+      if (Math.hypot(s.vx, s.vz, s.vy) > .3) samples.push([now, +s.x.toFixed(1), +s.z.toFixed(1), +s.y.toFixed(1)]);
+    };
+    const report = () => {
+      sent++; const n = performance.now();
+      const b = s.y <= 100.05 ? "PARKED" : s.vy > .3 ? "CLIMB" : s.vy < -.3 ? "DESCEND" : "HOVER";
+      receive(JSON.stringify({ v: "demo", m: "Menu", b, ls: b.toLowerCase(), smart: s.smart, ready: true, thr: s.thr, hover: 140,
+        sent, limit: 150, ts: Date.now(), p: [+s.x.toFixed(1), +s.y.toFixed(1), +s.z.toFixed(1)],
+        vel: [+s.vx.toFixed(1), +s.vy.toFixed(1), +s.vz.toFixed(1)], hd: Math.round(s.hd),
+        nav: s.nav ? { mode: s.nav.mode, x: s.nav.x, y: s.nav.y, z: s.nav.z, s: s.nav.s } : undefined,
+        h: samples.map(p => [+((n - p[0]) / 1000).toFixed(2), p[1], p[2], p[3]]) }), Date.now());
+      samples = [];
+    };
+    const a = setInterval(tick, 50), b = setInterval(report, 2000);
+    return {
+      report, stop() { clearInterval(a); clearInterval(b); },
+      command(k) {
+        if (k.c === "goto") { s.nav = { mode: "goto", x: k.x, y: k.y, z: k.z }; s.land = false; }
+        if (k.c === "hold") s.nav = { mode: "hold", x: Math.round(s.x), y: Math.round(s.y), z: Math.round(s.z) };
+        if (k.c === "cancel") s.nav = null;
+        if (k.c === "land") { s.nav = null; s.land = true; }
+        if (k.c === "smart") s.smart = k.on;
+        if (k.c === "throttle") s.thr = k.v;
+        report();
+      },
+    };
+  }
+
+  const fromUrl = new URLSearchParams(location.hash.slice(1)).get("code"), saved = store.get("shippilot-code");
+  if (fromUrl || saved) { $("code").value = fromUrl || saved; connect(); }
+  else { render(); note("Enter the website code from the ship's menu, or tick Demo to try it.", true); }
+  setInterval(render, 1000);
+})();
+</script>
+</body>
+</html>

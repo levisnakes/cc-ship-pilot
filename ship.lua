@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "2.10.0"
+VERSION = "3.0.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -48,6 +48,19 @@ LIFT_GAIN = 20          -- lift change per block/s of vertical speed error
 LIFT_LEARN = 8          -- how fast it fine-tunes the hover level
 -- Without altitude hold: how far up/down keys move the lift from the hover level.
 MANUAL_LIFT_STEP = 40
+
+-- Smart mode and autopilot (need CC: Sable; run Smart setup once first).
+NAV_SPEED = 10          -- autopilot top speed (blocks per second)
+NAV_ARRIVE = 2          -- autopilot: this close to the target counts as there
+TURN_RATE = 0.6         -- fastest the computer turns the ship (radians per second)
+
+-- Website control: https://levisnakes.github.io/cc-ship-pilot/
+-- The menu shows a code to type into the website. Messages go through the
+-- free ntfy.sh relay: about 250 a day per IP address, shared by every
+-- computer on the Minecraft server (the GPS missile too).
+REMOTE = true
+TELEMETRY_SECONDS = 5     -- status update interval while moving
+REMOTE_DAILY_LIMIT = 150  -- stop sending updates after this many a day
 
 -- ===================== END OF SETTINGS =======================
 
@@ -431,16 +444,49 @@ end
 local onSable = sublevel ~= nil and sublevel.isInPlotGrid()
 local alt, vy, lastAltT = nil, 0, nil
 local posX, posZ = nil, nil
+local vx, vz = 0, 0
+local yaw, yawRate = nil, 0   -- heading of the ship's +X axis (radians) and how fast it turns
+
+local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
+local function wrapAngle(a)
+  while a > math.pi do a = a - 2 * math.pi end
+  while a < -math.pi do a = a + 2 * math.pi end
+  return a
+end
+-- Rotates vector v by quaternion q.
+local function qrot(q, v)
+  local tx = 2 * (q.y * v.z - q.z * v.y)
+  local ty = 2 * (q.z * v.x - q.x * v.z)
+  local tz = 2 * (q.x * v.y - q.y * v.x)
+  return { x = v.x + q.w * tx + (q.y * tz - q.z * ty),
+           y = v.y + q.w * ty + (q.z * tx - q.x * tz),
+           z = v.z + q.w * tz + (q.x * ty - q.y * tx) }
+end
+
 local function readHeight()
   if not onSable then return end
   local ok, pose = pcall(sublevel.getLogicalPose)
   if not ok or not pose then return end
   local y, t = pose.position.y, now()
-  posX, posZ = pose.position.x, pose.position.z
-  if alt and lastAltT and t > lastAltT then
-    vy = vy * 0.5 + (y - alt) / (t - lastAltT) * 0.5
+  local px, pz = pose.position.x, pose.position.z
+  -- CC: Sable hands back a quaternion object (v = x/y/z, a = w).
+  local o, newYaw = pose.orientation, nil
+  if type(o) == "table" then
+    local q = o.v and { x = o.v.x, y = o.v.y, z = o.v.z, w = o.a } or { x = o.x, y = o.y, z = o.z, w = o.w }
+    if q.w then
+      local f = qrot(q, { x = 1, y = 0, z = 0 })
+      newYaw = atan2(f.z, f.x)
+    end
   end
-  alt, lastAltT = y, t
+  if alt and lastAltT and t > lastAltT then
+    local dt = t - lastAltT
+    vy = vy * 0.5 + (y - alt) / dt * 0.5
+    vx = vx * 0.5 + (px - posX) / dt * 0.5
+    vz = vz * 0.5 + (pz - posZ) / dt * 0.5
+    if newYaw and yaw then yawRate = yawRate * 0.5 + wrapAngle(newYaw - yaw) / dt * 0.5 end
+  end
+  alt, lastAltT, posX, posZ = y, t, px, pz
+  if newYaw then yaw = newYaw end
 end
 
 -- mode "off": the lift is left alone (parked, or set by hand in a menu).
@@ -520,6 +566,130 @@ local function liftLoop()
     liftStep(math.min(t - last, 0.5))
     last = t
     sleep(0.05)
+  end
+end
+
+-- ---------- smart mode and autopilot ----------
+-- cfg.smart (from Smart setup): left/right = how fast each turning group
+-- spins the ship at full power (radians/s^2, signed), fwd/back = forward
+-- and backward thrusters' push (blocks/s^2), offset = which way the ship's
+-- nose points compared to its +X axis.
+
+local function smartReady()
+  return yaw ~= nil and cfg.smart ~= nil and cfg.smart.left ~= nil and cfg.smart.right ~= nil
+end
+local function navReady() return smartReady() and cfg.smart.fwd ~= nil end
+
+-- Turning thruster powers for a yaw acceleration (radians/s^2).
+local function turnFor(accel)
+  local L, R = cfg.smart.left, cfg.smart.right
+  if math.abs(accel) < 0.02 then return 0, 0 end
+  if accel * L > 0 then return clamp(accel / L, 0, 1) * TURN_POWER, 0 end
+  if accel * R > 0 then return 0, clamp(accel / R, 0, 1) * TURN_POWER end
+  return 0, 0
+end
+
+-- Turn toward a heading; nil just stops the ship turning.
+local function steerYaw(target)
+  local wantRate = 0
+  if target then wantRate = clamp(1.2 * wrapAngle(target - yaw), -TURN_RATE, TURN_RATE) end
+  return turnFor((wantRate - yawRate) / 0.4)
+end
+
+local function noseYaw() return yaw + ((cfg.smart and cfg.smart.offset) or 0) end
+
+-- The autopilot: { mode = "goto" or "hold", x, y, z, status }
+local nav = nil
+local landing = false   -- website "land": sink until the lift switches off
+local remoteId, remoteState, remoteSent = nil, "off", 0   -- website link
+local function navStop(why)
+  if nav then log("autopilot off: %s", why or "") end
+  nav = nil
+  allThrustOff()
+end
+
+local function navLoop()
+  local stoppedSince = nil
+  while true do
+    if landing then
+      if lift.mode == "off" then
+        landing = false
+        lift.updown = 0
+        log("website land: landed")
+      else
+        lift.updown = -1
+      end
+    end
+    if nav and posX then
+      if not navReady() then
+        nav.status = "needs Smart setup first"
+      else
+        -- Height: take off if parked, then hold the target's Y (or this one).
+        if lift.mode ~= "fly" and liftAvailable() then
+          lift.mode = "fly"
+          lift.hover = math.max(shift, cfg.hover or 0)
+        end
+        if lift.updown == 0 then lift.holdAlt = nav.y or lift.holdAlt or alt end
+
+        local dx, dz = nav.x - posX, nav.z - posZ
+        local dist = math.sqrt(dx * dx + dz * dz)
+        local dirX, dirZ = 0, 0
+        if dist > 0.01 then dirX, dirZ = dx / dist, dz / dist end
+        -- The velocity it wants: toward the target, slow enough to stop in
+        -- time, then gently into place.
+        local fwdAcc = cfg.smart.fwd
+        local backAcc = cfg.smart.back or 0
+        local brake = math.max(0.2, math.min(fwdAcc, backAcc > 0.2 and backAcc or fwdAcc)) * 0.25
+        local speed = math.min(NAV_SPEED, math.sqrt(2 * brake * math.max(0, dist - 0.5)), 0.4 * dist)
+        local wx, wz = dirX * speed, dirZ * speed
+        -- The ship can only push along its nose (forward or back), so it
+        -- turns the nose along the change in velocity it needs, or the
+        -- opposite way and uses the back thrusters, whichever is less turning.
+        local ex, ez = wx - vx, wz - vz
+        local need = math.sqrt(ex * ex + ez * ez)
+        local heading = nav.course or yaw
+        -- Once there, only turn again for a real drift, so it doesn't spin
+        -- in place chasing tiny errors.
+        local reaim = dist > NAV_ARRIVE and 0.25 or 0.8
+        if need > reaim then
+          local h = atan2(ez, ex) - cfg.smart.offset
+          if backAcc > 0.2 and math.abs(wrapAngle(h + math.pi - yaw)) + 0.5 < math.abs(wrapAngle(h - yaw)) then
+            h = h + math.pi
+          end
+          heading = wrapAngle(h)
+          nav.course = heading
+        end
+        local l, r = steerYaw(heading)
+        local ny = noseYaw()
+        local along = ex * math.cos(ny) + ez * math.sin(ny)
+        local lined = math.cos(wrapAngle(heading - yaw)) > 0.9
+        local fwd, back = 0, 0
+        if lined and along > 0.1 then
+          fwd = clamp(along / (fwdAcc * 0.4), 0, 1) * 15
+        elseif lined and along < -0.1 and backAcc > 0.2 then
+          back = clamp(-along / (backAcc * 0.4), 0, 1) * BACK_POWER
+        end
+        setGroups({ forward = fwd, back = back, left = l, right = r })
+        thrust = fwd
+
+        local moving = math.sqrt(vx * vx + vz * vz)
+        if nav.mode == "goto" then
+          nav.status = string.format("%.0f blocks to go, %.1f b/s", dist, moving)
+          if dist < NAV_ARRIVE and moving < 0.5 then
+            stoppedSince = stoppedSince or now()
+            if now() - stoppedSince > 1 then
+              nav.mode, nav.status = "hold", "arrived - holding here"
+              log("autopilot: arrived at %.1f %.1f", posX, posZ)
+            end
+          else
+            stoppedSince = nil
+          end
+        else
+          nav.status = string.format("holding position (%.1f off)", dist)
+        end
+      end
+    end
+    sleep(0.1)
   end
 end
 
@@ -675,7 +845,9 @@ end
 -- A big two-line tile for the menu.
 local function tile(x, y, w, k, title, desc)
   if COLOR then
-    bg(colors.gray)
+    -- Checkerboard so touching tiles stay apart.
+    local odd = (math.floor((y - 8) / 2) + (x > 2 and 1 or 0)) % 2 == 1
+    bg(odd and colors.blue or colors.gray)
     for row = y, y + 1 do term.setCursorPos(x, row) write(string.rep(" ", w)) end
     term.setCursorPos(x + 1, y) fg(C.key) write(k) fg(colors.white) write("  " .. title)
     term.setCursorPos(x + 1, y + 1) fg(colors.lightGray) write(desc:sub(1, w - 2))
@@ -742,6 +914,7 @@ local function flyScreen()
   FORWARD_POWER = clamp(math.floor(START_THROTTLE + 0.5), 0, 15)
   log("throttle starts at %d", FORWARD_POWER)
   local throttleDir = 0
+  local course = yaw          -- smart mode: the heading to hold
   local function stepThrottle(dir)
     local v = clamp(math.floor(FORWARD_POWER + 0.5) + dir, 0, 15)
     if v ~= FORWARD_POWER then
@@ -756,7 +929,13 @@ local function flyScreen()
       local c = a:lower()
       if c == "q" then break
       elseif c == "+" or c == "=" then stepThrottle(1)
-      elseif c == "-" then stepThrottle(-1) end
+      elseif c == "-" then stepThrottle(-1)
+      elseif c == "m" then
+        cfg.smartOn = not cfg.smartOn
+        course = yaw
+        saveConfig()
+        log("smart mode %s", cfg.smartOn and "on" or "off")
+      end
     elseif ev == "throttle_set" and type(a) == "number" then
       FORWARD_POWER = clamp(a, 0, 15)
       log("throttle -> %d (tapped)", FORWARD_POWER)
@@ -779,20 +958,36 @@ local function flyScreen()
         left = turnL and TURN_POWER or 0,
         right = turnR and TURN_POWER or 0,
       }
-      local step = THRUST_RAMP * dt
-      local want = {}
-      for _, g in ipairs(GROUPS) do
-        want[g] = groupPower[g] + clamp(target[g] - groupPower[g], -step, step)
+      -- Any movement key takes over from the autopilot.
+      local manual = down("forward") or down("back") or turnL or turnR or down("up") or down("down")
+      if nav and manual then navStop("manual control") course = yaw end
+      -- Smart mode: hold the heading unless turning by hand. After a hand
+      -- turn it first stops the spin, then holds the new heading.
+      if cfg.smartOn and smartReady() and not nav then
+        if turnL or turnR then
+          course = nil
+        else
+          if course == nil and math.abs(yawRate) < 0.05 then course = yaw end
+          target.left, target.right = steerYaw(course)
+        end
       end
-      thrust = want.forward
-      setGroups(want)
+      if not nav then
+        local step = THRUST_RAMP * dt
+        local want = {}
+        for _, g in ipairs(GROUPS) do
+          want[g] = groupPower[g] + clamp(target[g] - groupPower[g], -step, step)
+        end
+        thrust = want.forward
+        setGroups(want)
+      end
       -- turning wins over backward when both are held
       local move = nil
       if down("left") and not down("right") then move = "left"
       elseif down("right") and not down("left") then move = "right"
       elseif down("back") then move = "back" end
       applyMove(move)
-      lift.updown = (down("up") and 1 or 0) - (down("down") and 1 or 0)
+      local ud = (down("up") and 1 or 0) - (down("down") and 1 or 0)
+      if ud ~= 0 or not landing then lift.updown = ud end
 
       screen("Fly")
       local names = {}
@@ -833,9 +1028,19 @@ local function flyScreen()
         out(" Relays    ", currentMove, { C.dim, " (" .. describe(cfg.moves[currentMove]) .. ")" })
       end
       if relayError then out({ C.bad, " Relay error: " .. relayError }) end
-      print("")
-      footer({ { "Q", "Menu", { char = "q" } }, { "-", "Slower", { char = "-" } }, { "+", "Faster", { char = "+" } },
-        { "", "ship keeps hovering" } })
+      if nav then
+        out(" Autopilot ", { C.good, nav.status or "" }, { C.dim, "  (any key takes over)" })
+      elseif cfg.smartOn then
+        if not smartReady() then
+          out(" Smart     ", { C.warn, "needs Smart setup (menu)" })
+        elseif yaw then
+          out(" Smart     ", string.format("heading %3d", math.floor(math.deg(noseYaw()) % 360 + 0.5)),
+            { C.dim, course and string.format("  holding %3d", math.floor(math.deg(course + cfg.smart.offset) % 360 + 0.5))
+              or "  turning by hand" })
+        end
+      end
+      footer({ { "Q", "Menu", { char = "q" } }, { "-", "", { char = "-" } }, { "+", "", { char = "+" } },
+        { "M", cfg.smartOn and "Smart ON" or "Smart off", { char = "m" } } })
       timer = os.startTimer(0.05)
     end
   end
@@ -1127,8 +1332,8 @@ local TUNE = {
       "and down; raise it if it drifts." } },
   { name = "hover", label = "Hover level", step = 1, min = 0, max = 256,
     help = { "Lift level that hovers (0-256). Hover", "calibration and flying set it too." } },
-  { name = "MANUAL_LIFT_STEP", label = "Manual lift step", step = 4, min = 0, max = 128,
-    help = { "Only without a height reading: lift", "added or taken away while up/down", "is held." } },
+  { name = "NAV_SPEED", label = "Autopilot speed", step = 1, min = 2, max = 40,
+    help = { "Top speed when flying to coordinates", "(blocks per second)." } },
 }
 local TUNE_DEFAULT = {}
 for _, t in ipairs(TUNE) do if t.name ~= "hover" then TUNE_DEFAULT[t.name] = _ENV[t.name] end end
@@ -1264,6 +1469,229 @@ local function thrusterSetup()
   end
 end
 
+-- Fires the thrusters briefly to learn how they turn and push the ship.
+local function smartSetup()
+  screen("Smart setup")
+  if not onSable or not yaw then
+    out({ C.warn, " Needs the ship's position and heading (CC: Sable)." })
+    pause()
+    return
+  end
+  if #group.left == 0 or #group.right == 0 or #group.forward == 0 then
+    out({ C.warn, " Needs turn left, turn right and forward thrusters" })
+    out({ C.warn, " (Thruster setup)." })
+    pause()
+    return
+  end
+  hint(" The ship turns a little left and right, then")
+  hint(" moves forward and back a few blocks, and stops.")
+  hint(" Do this hovering, with some room around it.")
+  footer({ { "Enter", "Start", { key = keys.enter } }, { "Q", "Cancel", { char = "q" } } })
+  while true do
+    local ev, a = os.pullEvent()
+    if ev == "char" and a:lower() == "q" then return end
+    if ev == "key" and a == keys.enter then break end
+  end
+  -- Keep hovering through all of it.
+  if lift.mode ~= "fly" and liftAvailable() then
+    lift.mode, lift.hover = "fly", math.max(shift, cfg.hover or 0)
+  end
+  lift.updown = 0
+  local function show(step)
+    screen("Smart setup")
+    out(" ", { C.key, step })
+    print("")
+    out(" Heading  ", string.format("%3d", math.floor(math.deg(yaw) % 360 + 0.5)),
+      { C.dim, string.format("   turning %+.2f rad/s", yawRate) })
+    out(" Speed    ", string.format("%.1f b/s", math.sqrt(vx * vx + vz * vz)))
+  end
+  -- Full power for a moment, then measure the change once it spins down.
+  local function pulse(step, want, seconds)
+    show(step)
+    local r0, v0x, v0z, y0, t0 = yawRate, vx, vz, yaw, now()
+    setGroups(want)
+    while now() - t0 < seconds do sleep(0.1) show(step) end
+    setGroups({})
+    local held = now() - t0
+    sleep(0.4)
+    return (yawRate - r0) / held, (vx - v0x) / held, (vz - v0z) / held, y0
+  end
+  local function settle(step, seconds)
+    local t0 = now()
+    while now() - t0 < seconds do
+      local l, r = steerYaw(nil)
+      local fwd, back = 0, 0
+      if cfg.smart.fwd then
+        local ny = noseYaw()
+        local along = vx * math.cos(ny) + vz * math.sin(ny)
+        if along > 0.2 then back = clamp(along / math.max(0.2, cfg.smart.back or 0.5), 0, 1) * BACK_POWER
+        elseif along < -0.2 then fwd = clamp(-along / cfg.smart.fwd, 0, 1) * 15 end
+      end
+      setGroups({ left = l, right = r, forward = fwd, back = back })
+      if math.abs(yawRate) < 0.03 and math.sqrt(vx * vx + vz * vz) < 0.3 and now() - t0 > 1 then break end
+      sleep(0.1)
+      show(step)
+    end
+    setGroups({})
+  end
+
+  local L = pulse("Turning left...", { left = 15 }, 0.6)
+  local R = pulse("Turning right...", { right = 15 }, 0.6)
+  log("smart setup: left %.3f right %.3f rad/s^2", L, R)
+  if math.abs(L) < 0.02 or math.abs(R) < 0.02 or L * R > 0 then
+    screen("Smart setup")
+    out({ C.bad, " The turning thrusters didn't turn the ship" })
+    out({ C.bad, " opposite ways." })
+    hint(string.format(" Measured: left %.2f, right %.2f", L, R))
+    hint(" Check Thruster setup, then try again.")
+    pause()
+    return
+  end
+  cfg.smart = { left = L, right = R }
+  settle("Stopping the turn...", 6)
+  local _, ax, az, y0 = pulse("Forward...", { forward = 15 }, 1.0)
+  local fwdAcc = math.sqrt(ax * ax + az * az)
+  local offset = wrapAngle(atan2(az, ax) - y0)
+  cfg.smart.offset = offset
+  local _, bx, bz = pulse("Backward...", { back = 15 }, 1.0)
+  local backAcc = -(bx * math.cos(y0 + offset) + bz * math.sin(y0 + offset))
+  log("smart setup: forward %.2f back %.2f b/s^2, nose offset %.0f deg", fwdAcc, backAcc, math.deg(offset))
+  if fwdAcc < 0.05 then
+    screen("Smart setup")
+    out({ C.bad, " The forward thrusters didn't move the ship." })
+    pause()
+    return
+  end
+  cfg.smart.fwd = fwdAcc
+  cfg.smart.back = backAcc > 0.05 and backAcc or nil
+  settle("Stopping...", 8)
+  saveConfig()
+  screen("Smart setup")
+  out(" ", { C.good, "Done!" })
+  print("")
+  out(" Turning    ", string.format("left %.2f  right %.2f rad/s2", L, R))
+  out(" Forward    ", string.format("%.2f b/s2", fwdAcc))
+  out(" Backward   ", cfg.smart.back and string.format("%.2f b/s2", cfg.smart.back) or { C.warn, "none - it can't brake" })
+  print("")
+  hint(" Smart mode (M on the Fly screen) and the")
+  hint(" autopilot (Go to) can be used now.")
+  pause()
+end
+
+-- Shows the autopilot working; it keeps flying from the menu too.
+local function autopilotScreen()
+  while true do
+    screen("Autopilot")
+    if not nav then
+      out({ C.dim, " The autopilot is off." })
+      footer({ { "Q", "Menu", { char = "q" } } })
+      waitChar("q")
+      return
+    end
+    out(" Target    ", string.format("%d  %s  %d", nav.x, nav.y and tostring(nav.y) or "-", nav.z),
+      { C.dim, nav.y and "" or "  (keeps height)" })
+    if posX then
+      local d = math.sqrt((nav.x - posX) ^ 2 + (nav.z - posZ) ^ 2)
+      out(" Distance  ", string.format("%.1f blocks", d))
+      out(" Position  ", string.format("%.0f  %.0f  %.0f", posX, alt or 0, posZ))
+      out(" Speed     ", string.format("%.1f b/s", math.sqrt(vx * vx + vz * vz)))
+    end
+    print("")
+    out(" Status    ", { nav.mode == "hold" and C.good or C.head, nav.status or "starting" })
+    print("")
+    hint(" Moving any key on the typewriter takes over.")
+    footer({ { "S", "Stop here", { char = "s" } }, { "C", "Cancel", { char = "c" } }, { "Q", "Menu", { char = "q" } } })
+    local timer = os.startTimer(0.25)
+    local ev, a = os.pullEvent()
+    os.cancelTimer(timer)
+    if ev == "char" then
+      local c = a:lower()
+      if c == "q" then return
+      elseif c == "s" and posX then
+        nav = { mode = "hold", x = math.floor(posX + 0.5), z = math.floor(posZ + 0.5), y = alt and math.floor(alt + 0.5) }
+        log("autopilot: hold here")
+      elseif c == "c" then
+        navStop("cancelled")
+      end
+    end
+  end
+end
+
+-- Type or tap in coordinates, then fly there.
+local function gotoScreen()
+  local f = { x = "", y = "", z = "" }
+  if nav then f.x, f.y, f.z = tostring(nav.x), nav.y and tostring(nav.y) or "", tostring(nav.z) end
+  local order, cur, msg = { "x", "z", "y" }, "x", nil
+  while true do
+    screen("Go to")
+    if not navReady() then out({ C.warn, " Run Smart setup first (menu)." }) else
+      hint(" Type or tap the coordinates. Y can stay empty.") end
+    print("")
+    local _, y0 = cursor()
+    y0 = y0 or 5
+    local x = 2
+    for _, k in ipairs(order) do
+      local val = f[k] ~= "" and f[k] or (k == "y" and "keep" or "")
+      term.setCursorPos(x, y0)
+      fg(cur == k and C.key or colors.white) write(k:upper() .. " ") fg(colors.white)
+      local box = string.format(" %-7s", val):sub(1, 8)
+      if COLOR then bg(cur == k and colors.gray or colors.black) write(box) bg(colors.black)
+      else write(cur == k and ("[" .. box .. "]") or (" " .. box .. " ")) end
+      buttons[#buttons + 1] = { x1 = x, x2 = x + 10, y = y0, char = k }
+      x = x + 16
+    end
+    if posX then
+      term.setCursorPos(2, y0 + 1)
+      fg(C.dim) write(string.format("now %.0f  %.0f  %.0f", posX, alt or 0, posZ)) fg(colors.white)
+    end
+    -- Keypad
+    local rows = { { "7", "8", "9" }, { "4", "5", "6" }, { "1", "2", "3" }, { "-", "0", "<" } }
+    for i, row in ipairs(rows) do
+      local kx = 4
+      for _, k in ipairs(row) do
+        if k == "<" then kx = chip(kx, y0 + 2 + i * 2 - 1, "<", "", { key = keys.backspace })
+        else kx = chip(kx, y0 + 2 + i * 2 - 1, k, "", { char = k }) end
+        kx = kx + 1
+      end
+    end
+    chip(24, y0 + 3, "H", "Here", { char = "h" })
+    chip(24, y0 + 5, "N", "Next field", { char = "n" })
+    chip(24, y0 + 7, "C", "Clear", { char = "c" })
+    if msg then term.setCursorPos(24, y0 + 9) fg(C.warn) write(msg) fg(colors.white) end
+    footer({ { "G", "Go", { char = "g" } }, { "Q", "Cancel", { char = "q" } } })
+    msg = nil
+    local ev, a = os.pullEvent()
+    if ev == "char" then
+      local c = a:lower()
+      if c:match("[%d]") or (c == "-" and f[cur] == "") then
+        if #f[cur] < 7 then f[cur] = f[cur] .. c end
+      elseif c == "x" or c == "y" or c == "z" then cur = c
+      elseif c == "n" then
+        for i, k in ipairs(order) do if k == cur then cur = order[i % 3 + 1] break end end
+      elseif c == "h" and posX then
+        f.x, f.z = tostring(math.floor(posX + 0.5)), tostring(math.floor(posZ + 0.5))
+        f.y = alt and tostring(math.floor(alt + 0.5)) or ""
+      elseif c == "c" then f[cur] = ""
+      elseif c == "q" then return
+      elseif c == "g" then
+        local gx, gy, gz = tonumber(f.x), tonumber(f.y), tonumber(f.z)
+        if not gx or not gz then msg = "X and Z needed"
+        elseif not navReady() then msg = "Smart setup first"
+        else
+          nav = { mode = "goto", x = gx, y = gy, z = gz }
+          log("autopilot: go to %s %s %s", gx, tostring(gy), gz)
+          autopilotScreen()
+          return
+        end
+      end
+    elseif ev == "key" then
+      if a == keys.backspace then f[cur] = f[cur]:sub(1, -2)
+      elseif a == keys.enter then os.queueEvent("char", "g")
+      elseif a == keys.tab then os.queueEvent("char", "n") end
+    end
+  end
+end
+
 local function menu()
   while true do
     screen("Menu")
@@ -1285,19 +1713,28 @@ local function menu()
 
     local L, R, w = 2, 27, 24
     tile(L, 8, w, "F", "Fly", "fly with typewriter")
-    tile(R, 8, w, "P", "Thrusters", "jobs for each thruster")
-    tile(L, 11, w, "H", "Hover", "calibrate hovering")
-    tile(R, 11, w, "U", "Tuning", "power, speed, response")
+    tile(R, 8, w, "A", "Go to", nav and "autopilot ON" or "autopilot to coords")
+    tile(L, 10, w, "P", "Thrusters", "jobs for each thruster")
+    tile(R, 10, w, "S", "Smart setup", navReady() and "done - redo any time" or "needed for smart/auto")
+    tile(L, 12, w, "H", "Hover", "calibrate hovering")
+    tile(R, 12, w, "U", "Tuning", "power, speed, response")
     tile(L, 14, w, "K", "Keybinds", "typewriter keys")
     tile(R, 14, w, "G", "Gearshifts", "optional relay turning")
-    tile(L, 17, w, "T", "Typewriter test", "see what keys arrive")
-    tile(R, 17, w, "M", "Manual test", "relays, thrust, lift")
+    tile(L, 16, w, "T", "Typewriter test", "see what keys arrive")
+    tile(R, 16, w, "M", "Manual test", "relays, thrust, lift")
+    if REMOTE and remoteId then
+      term.setCursorPos(2, 18)
+      fg(C.dim) write("Website code ") fg(C.key) write(remoteId)
+      fg(remoteState == "connected" and C.good or C.warn) write("  " .. remoteState) fg(colors.white)
+    end
     term.setCursorPos(2, H)
     if relayError then
       fg(C.bad) write(("Relay error: " .. relayError):sub(1, W - 2)) fg(colors.white)
     end
-    local ch = waitChar("ftkghupm")
+    local ch = waitChar("ftkghupmas")
     if ch == "f" then flyScreen()
+    elseif ch == "a" then if nav then autopilotScreen() else gotoScreen() end
+    elseif ch == "s" then smartSetup()
     elseif ch == "t" then typewriterTest()
     elseif ch == "k" then keybinds()
     elseif ch == "g" then gearshiftSetup()
@@ -1307,6 +1744,165 @@ local function menu()
     elseif ch == "m" then manualTest() end
   end
 end
+
+-- ---------- website control ----------
+-- Commands come in on ntfy.sh topic shippilot-<code>-cmd over a websocket;
+-- status updates go out on shippilot-<code>-tel. Anyone with the code can
+-- send commands, so treat it like a password.
+
+local wantUpdate = false
+local trail = {}   -- position 4 times a second since the last update
+
+local function remoteTopic(kind) return "shippilot-" .. remoteId .. "-" .. kind end
+
+local function loadRemoteId()
+  local path = "ship_remote_id"
+  if fs.exists(path) then
+    local h = fs.open(path, "r")
+    local id = h.readAll():match("%w+")
+    h.close()
+    if id then return id end
+  end
+  math.randomseed(os.epoch("utc"))
+  local chars, id = "abcdefghjkmnpqrstuvwxyz23456789", ""
+  for _ = 1, 8 do
+    local i = math.random(1, #chars)
+    id = id .. chars:sub(i, i)
+  end
+  local h = fs.open(path, "w")
+  h.write(id)
+  h.close()
+  return id
+end
+
+-- Today's update count, kept in a file so a reboot doesn't reset it.
+local function countSent()
+  local today = os.date("!%Y-%m-%d")
+  local day, n = nil, 0
+  if fs.exists("ship_remote_count") then
+    local h = fs.open("ship_remote_count", "r")
+    day, n = h.readAll():match("(%S+)%s+(%d+)")
+    h.close()
+  end
+  return today, (day == today and tonumber(n) or 0)
+end
+
+local function r1(v) return math.floor(v * 10 + 0.5) / 10 end
+
+local function telemetry()
+  local badge = liftBadge()
+  local t = {
+    v = VERSION, m = currentScreen or "-", b = badge, ls = lift.status,
+    smart = cfg.smartOn == true, ready = navReady(), thr = math.floor(FORWARD_POWER + 0.5),
+    hover = cfg.hover, sent = remoteSent + 1, limit = REMOTE_DAILY_LIMIT, ts = os.epoch("utc"),
+  }
+  if posX then
+    t.p = { r1(posX), r1(alt or 0), r1(posZ) }
+    t.vel = { r1(vx), r1(vy), r1(vz) }
+  end
+  if yaw then t.hd = math.floor(math.deg(noseYaw()) % 360 + 0.5) end
+  if nav then t.nav = { mode = nav.mode, x = nav.x, y = nav.y, z = nav.z, s = nav.status } end
+  local h, nowT = {}, now()
+  for i, smp in ipairs(trail) do h[i] = { math.floor((nowT - smp.t) * 100 + 0.5) / 100, smp.x, smp.z, smp.y } end
+  if #h > 0 then t.h = h end
+  return t
+end
+
+local function sendUpdate()
+  local today, n = countSent()
+  remoteSent = n
+  if n >= REMOTE_DAILY_LIMIT then
+    remoteState = "daily limit reached"
+    return false
+  end
+  local ok, res = pcall(http.post, "https://ntfy.sh/" .. remoteTopic("tel"), textutils.serializeJSON(telemetry()))
+  if ok and res then
+    res.close()
+    trail = {}
+    remoteSent = n + 1
+    local f = fs.open("ship_remote_count", "w")
+    f.write(today .. " " .. remoteSent)
+    f.close()
+    return true
+  end
+  return false
+end
+
+local function handleCommand(c)
+  log("website: %s", tostring(c.c))
+  local x, y, z = tonumber(c.x), tonumber(c.y), tonumber(c.z)
+  if c.c == "goto" and x and z then
+    if navReady() then
+      nav = { mode = "goto", x = x, y = y, z = z }
+      landing = false
+    end
+  elseif c.c == "hold" and posX then
+    if navReady() then
+      nav = { mode = "hold", x = math.floor(posX + 0.5), z = math.floor(posZ + 0.5), y = alt and math.floor(alt + 0.5) }
+      landing = false
+    end
+  elseif c.c == "cancel" then
+    navStop("website")
+  elseif c.c == "land" then
+    navStop("website land")
+    landing = true
+  elseif c.c == "smart" then
+    cfg.smartOn = c.on == true
+    saveConfig()
+  elseif c.c == "throttle" and tonumber(c.v) then
+    FORWARD_POWER = clamp(math.floor(tonumber(c.v) + 0.5), 0, 15)
+  end
+  wantUpdate = true   -- every command (including "ping") gets a fresh update
+end
+
+local function remoteLoop()
+  while true do
+    remoteState = "connecting"
+    local ok, ws = pcall(http.websocket, "wss://ntfy.sh/" .. remoteTopic("cmd") .. "/ws")
+    if ok and ws then
+      remoteState = "connected"
+      wantUpdate = true
+      while true do
+        -- ntfy sends a keepalive about every 45 s.
+        local ok2, msg = pcall(ws.receive, 60)
+        if not ok2 or not msg then break end
+        local ev = textutils.unserializeJSON(msg)
+        if type(ev) == "table" and ev.event == "message" and ev.message then
+          local cmd = textutils.unserializeJSON(ev.message)
+          -- Ignore stale commands (over a minute old).
+          if type(cmd) == "table" and (not cmd.ts or math.abs(os.epoch("utc") - cmd.ts) < 60000) then
+            handleCommand(cmd)
+          end
+        end
+      end
+      pcall(ws.close)
+    end
+    remoteState = "offline, retrying"
+    sleep(10)
+  end
+end
+
+-- Status updates: on changes, every TELEMETRY_SECONDS while moving, and
+-- when the website asks. Positions are kept 4 times a second in between.
+local function telemetryLoop()
+  local lastSent, lastShape = -math.huge, nil
+  while true do
+    local moving = nav ~= nil or (posX and (math.abs(vx) + math.abs(vz) + math.abs(vy)) > 0.3)
+    if moving and posX then
+      trail[#trail + 1] = { t = now(), x = r1(posX), z = r1(posZ), y = r1(alt or 0) }
+      if #trail > 60 then table.remove(trail, 1) end
+    end
+    local shape = tostring(currentScreen) .. liftBadge() .. tostring(cfg.smartOn) .. (nav and nav.mode or "-")
+    local due = wantUpdate or (shape ~= lastShape and now() - lastSent > 2)
+      or (moving and now() - lastSent > TELEMETRY_SECONDS)
+    if due and remoteState == "connected" then
+      wantUpdate = false
+      if sendUpdate() then lastSent, lastShape = now(), shape end
+    end
+    sleep(0.25)
+  end
+end
+
 
 -- ---------- main ----------
 
@@ -1399,11 +1995,12 @@ local function sampleLoop()
     readVelocity()
     local held = {}
     for _, act in ipairs(ACTIONS) do if down(act.id) then held[#held + 1] = act.id end end
-    log("S %-6s keys=%s thrust=%d move=%s lift=%s %d/256 hover=%s y=%s vy=%+.2f vel=%s pos=%s",
+    log("S %-6s keys=%s thrust=%d move=%s lift=%s %d/256 hover=%s y=%s vy=%+.2f vel=%s pos=%s yaw=%s rate=%+.2f v=%.1f,%.1f nav=%s",
       currentScreen or "-", #held > 0 and table.concat(held, "+") or "-", math.floor(thrust + 0.5),
       currentMove or "-", lift.mode, math.floor(shift + 0.5), lift.hover and tostring(math.floor(lift.hover + 0.5)) or "-",
       alt and string.format("%.2f", alt) or "-", vy, velText(),
-      posX and string.format("%.1f,%.1f", posX, posZ) or "-")
+      posX and string.format("%.1f,%.1f", posX, posZ) or "-", yaw and string.format("%.0f", math.deg(yaw)) or "-",
+      yawRate, vx, vz, nav and (nav.mode .. " " .. tostring(nav.status)) or "-")
     sleep(currentScreen == "Fly" and 0.2 or 1)
   end
 end
@@ -1430,7 +2027,11 @@ log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_G
   tostring(LIFT_GAIN), tostring(LIFT_LEARN), tostring(MANUAL_LIFT_STEP))
 
 pcall(mirrorToMonitor)
-local ok, err = xpcall(function() parallel.waitForAny(liftLoop, ui, sampleLoop, touchLoop) end, debug.traceback)
+REMOTE = REMOTE and http ~= nil and http.websocket ~= nil
+if REMOTE then remoteId = loadRemoteId() log("website code %s", remoteId) end
+local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop }
+if REMOTE then loops[#loops + 1] = remoteLoop loops[#loops + 1] = telemetryLoop end
+local ok, err = xpcall(function() parallel.waitForAny(table.unpack(loops)) end, debug.traceback)
 log("stopped: %s", ok and "ok" or tostring(err))
 if logFile then logFile.close() end
 -- Thrusters and turning off; the lift stays where it is so the ship doesn't drop.
