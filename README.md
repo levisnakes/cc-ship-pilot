@@ -25,10 +25,11 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 | Space | up |
 | Left Shift | down (hold it on the ground to land and switch the lift off) |
 | ↑ / ↓ arrows | throttle: forward power 0-15, one step per tap. It starts at 5 every time you open Fly (Start throttle in Tuning). W fires at this power. You can also set it on the Fly screen: tap **[-]** / **[+]**, tap a cell of the throttle bar to jump to that level, or press - / + on the computer. |
+| Left Ctrl | **boost**: full forward power (15) while held, whatever the throttle; spools up twice as fast. |
 
 Change them in the **Keybinds** menu.
 
-**Arrow keys need a binding.** The typewriter only sends a key to the computer if that key is bound to a Redstone Link frequency on the typewriter; WASD, Space and Shift come bound, the arrow keys don't. Sneak + right-click the typewriter to open its configuration screen and give ↑ and ↓ any frequency (they don't need to drive anything). Check them in **T (Typewriter test)**: they should show "From: typewriter". Until the program has seen them, the Fly screen reminds you. The throttle can always be set on the Fly screen too (tap [-] / [+] or the bar).
+**Arrow keys need a binding.** The typewriter only sends a key to the computer if that key is bound to a Redstone Link frequency on the typewriter; WASD, Space and Shift come bound; the arrow keys and Ctrl don't. Sneak + right-click the typewriter to open its configuration screen and give ↑, ↓ and Left Ctrl any frequency (they don't need to drive anything). Check them in **T (Typewriter test)**: they should show "From: typewriter". Until the program has seen them, the Fly screen reminds you. The throttle can always be set on the Fly screen too (tap [-] / [+] or the bar).
 
 ## Menu (on the computer)
 

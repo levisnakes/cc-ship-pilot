@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -87,9 +87,10 @@ local ACTIONS = {
   { id = "down",    label = "Down" },
   { id = "faster",  label = "Faster" },
   { id = "slower",  label = "Slower" },
+  { id = "boost",   label = "Boost" },
 }
 local DEFAULT_KEYS = { forward = "w", back = "s", left = "a", right = "d", up = "space", down = "leftShift",
-  faster = "up", slower = "down" }
+  faster = "up", slower = "down", boost = "leftCtrl" }
 
 local function clamp(v, lo, hi)
   if v < lo then return lo elseif v > hi then return hi end
@@ -1133,13 +1134,14 @@ local function flyScreen()
       local turnL = down("left") and not down("right")
       local turnR = down("right") and not down("left")
       local target = {
-        forward = down("forward") and FORWARD_POWER or 0,
+        -- Boost (Ctrl): full forward power, whatever the throttle says.
+        forward = down("boost") and 15 or (down("forward") and FORWARD_POWER or 0),
         back = down("back") and BACK_POWER or 0,
         left = turnL and TURN_POWER or 0,
         right = turnR and TURN_POWER or 0,
       }
       -- Any movement key takes over from the autopilot or a landing.
-      local manual = down("forward") or down("back") or turnL or turnR or down("up") or down("down")
+      local manual = down("forward") or down("boost") or down("back") or turnL or turnR or down("up") or down("down")
       if nav and manual then navStop("manual control") course = yaw end
       if landing and manual then landing = false log("landing cancelled by hand") end
 
@@ -1155,7 +1157,7 @@ local function flyScreen()
         -- Smart braking: off the gas (neither forward nor back held), a PI
         -- controller on the speed along the nose brings the ship to a stop.
         braking = false
-        if navReady() and not down("forward") and not down("back") then
+        if navReady() and not down("forward") and not down("boost") and not down("back") then
           local ny = noseYaw()
           local vAlong = vx * math.cos(ny) + vz * math.sin(ny)
           if math.abs(vAlong) > 0.15 then
@@ -1183,7 +1185,9 @@ local function flyScreen()
         local step = THRUST_RAMP * dt
         local want = {}
         for _, g in ipairs(GROUPS) do
-          want[g] = groupPower[g] + clamp(target[g] - groupPower[g], -step, step)
+          -- Boost spools the forward thrusters up twice as fast.
+          local st = (g == "forward" and down("boost")) and step * 2 or step
+          want[g] = groupPower[g] + clamp(target[g] - groupPower[g], -st, st)
         end
         thrust = want.forward
         setGroups(want)
@@ -1244,6 +1248,7 @@ local function flyScreen()
         if fuel.low then
           msgs[#msgs + 1] = { { C.bad, " LOW FUEL" }, { C.dim, LOW_FUEL_LAND > 0 and string.format(" - lands itself at %ds left", LOW_FUEL_LAND) or "" } }
         end
+        if down("boost") then msgs[#msgs + 1] = { { C.key, " BOOST" }, { C.dim, "  full forward power" } } end
         if landing then msgs[#msgs + 1] = { { C.warn, " Landing" }, { C.dim, "  (any movement key takes over)" } } end
         if nav then
           msgs[#msgs + 1] = { { C.good, " Autopilot " }, nav.status or "", { C.dim, "  (any key takes over)" } }
@@ -1258,7 +1263,7 @@ local function flyScreen()
         end
         if relayError then msgs[#msgs + 1] = { { C.bad, " Relay error: " .. relayError } } end
         if not throttleSeen then
-          msgs[#msgs + 1] = { { C.dim, " Arrow keys: bind them to a link frequency on" } }
+          msgs[#msgs + 1] = { { C.dim, " Arrows/Ctrl: bind them to a link frequency on" } }
           msgs[#msgs + 1] = { { C.dim, " the typewriter (sneak + right-click it)." } }
         end
         for i = 1, math.min(#msgs, 6) do out(table.unpack(msgs[i])) end
@@ -1318,9 +1323,9 @@ local function keybinds()
       out(" ", { C.key, tostring(i) }, string.format("  %-11s ", act.label), { C.head, cfg.keys[act.id] })
     end
     print("")
-    hint(" Tap an action (or press 1-8) to change its key.")
+    hint(" Tap an action (or press 1-9) to change its key.")
     footer({ { "R", "Reset to defaults", { char = "r" } }, { "Q", "Back", { char = "q" } } })
-    local ch = waitChar("12345678rq")
+    local ch = waitChar("123456789rq")
     if ch == "q" then return end
     if ch == "r" then
       for id, name in pairs(DEFAULT_KEYS) do cfg.keys[id] = name end
