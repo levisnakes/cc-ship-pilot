@@ -30,6 +30,8 @@ Change them in the **Keybinds** menu. The typewriter only passes on movement key
 
 ## Menu (on the computer)
 
+Everything on screen can be **tapped**: click a key letter or its label on an advanced computer, or tap it on an **Advanced Monitor** connected to the computer (the screens are mirrored onto it if it's at least 51x19 characters; text scale 0.5 is used if needed).
+
 | Key | Screen |
 |---|---|
 | F | Fly. Q on the computer goes back to the menu; the ship keeps hovering. |

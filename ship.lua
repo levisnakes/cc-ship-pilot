@@ -23,10 +23,14 @@
 -- menus too) it holds its height. Setup from the menus is saved in
 -- ship.cfg.
 --
+-- Touch: click any key letter or its label on an advanced computer, or tap
+-- it on an Advanced Monitor (the screens are mirrored onto one if it's
+-- connected and big enough).
+--
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -551,15 +555,59 @@ local function meter(v, max, width, col)
   end
 end
 
--- One line from pieces: "text", { color, "text" } or a meter.
+-- Tappable areas on the current screen: { x1, x2, y, char = , key = }.
+-- A tap turns into the same char (or key) event as typing it.
+local buttons = {}
+local tapAnywhere = false   -- pause(): any tap continues
+
+local function cursor()
+  local ok, x, y = pcall(term.getCursorPos)
+  if ok and type(x) == "number" then return x, y end
+end
+
+-- Which key(s) a yellow key label stands for.
+local function keysIn(text)
+  if text == "Enter" then return { { key = keys.enter } } end
+  if text:match("^%d%-%d$") then return {} end           -- a range like 1-9
+  local list = {}
+  for ch in text:gmatch("[^%s/]") do list[#list + 1] = { char = ch:lower() } end
+  if #list > 1 and not text:find("/") then return {} end  -- a word, not keys
+  return list
+end
+
+-- One line from pieces: "text", { color, "text" } or a meter. Yellow
+-- (key) pieces become buttons that reach to the end of their label.
 local function out(...)
+  local current = nil
   for _, part in ipairs({ ... }) do
+    local x, y = cursor()
     if type(part) == "table" then
       fg(part[1]) write(part[2]) fg(colors.white)
+      if part[1] == C.key and x then
+        current = nil
+        local ks = keysIn(part[2])
+        if #ks == 1 then
+          current = { x1 = x, x2 = x + #part[2] - 1, y = y, char = ks[1].char, key = ks[1].key }
+          buttons[#buttons + 1] = current
+        elseif #ks > 1 then
+          -- "+/-", "N/P": one button per key letter
+          local i = 0
+          for c in part[2]:gmatch(".") do
+            if c ~= " " and c ~= "/" then
+              buttons[#buttons + 1] = { x1 = x + i, x2 = x + i, y = y, char = c:lower() }
+            end
+            i = i + 1
+          end
+        end
+      elseif current and x then
+        current.x2 = x + #part[2] - 1
+      end
     elseif type(part) == "function" then
+      current = nil
       part()
     else
       write(tostring(part))
+      if current and x then current.x2 = x + #tostring(part) - 1 end
     end
   end
   print("")
@@ -575,6 +623,7 @@ local function onOff(v) return v and { C.good, "ON " } or { C.dim, "off" } end
 
 local currentScreen = nil
 local function screen(title)
+  buttons = {}
   if title ~= currentScreen then
     currentScreen = title
     log("screen: %s", title)
@@ -604,8 +653,10 @@ end
 
 local function pause(msg)
   print("")
-  hint(msg or "Press any key.")
+  hint(msg or "Press any key (or tap).")
+  tapAnywhere = true
   os.pullEvent("char")
+  tapAnywhere = false
 end
 
 local function liftLine()
@@ -696,7 +747,7 @@ local function flyScreen()
       end
       if relayError then out({ C.bad, " Relay error: " .. relayError }) end
       print("")
-      hint(" Q on the computer: menu (the ship keeps hovering)")
+      out(" ", { C.key, "Q" }, " Menu", { C.dim, "  (the ship keeps hovering)" })
       timer = os.startTimer(0.05)
     end
   end
@@ -1188,6 +1239,62 @@ elseif transmission then
   if shift > 0 then lift.mode, lift.hover = "fly", shift end
 end
 
+-- Turns clicks on the computer and taps on the monitor into key presses.
+local function touchLoop()
+  while true do
+    local ev, a, x, y = os.pullEvent()
+    if ev == "mouse_click" or ev == "monitor_touch" then
+      local hit = nil
+      for _, b in ipairs(buttons) do
+        if y == b.y and x >= b.x1 and x <= b.x2 then hit = b break end
+      end
+      if hit then
+        log("tap %d,%d -> %s", x, y, hit.char or "enter")
+        if hit.key then os.queueEvent("key", hit.key, false) else os.queueEvent("char", hit.char) end
+      elseif tapAnywhere then
+        os.queueEvent("char", " ")
+      end
+    end
+  end
+end
+
+-- An Advanced Monitor, if there is one big enough, shows the same screens.
+local monitor = nil
+local function mirrorToMonitor()
+  local m = peripheral.find("monitor", function(_, p) return p.isColor and p.isColor() end)
+  if not m then return end
+  for _, scale in ipairs({ 1, 0.5 }) do
+    m.setTextScale(scale)
+    local mw, mh = m.getSize()
+    if mw >= W and mh >= 19 then
+      monitor = m
+      break
+    end
+  end
+  if not monitor then
+    log("monitor too small for the screens, not used")
+    return
+  end
+  m.setBackgroundColor(colors.black)
+  m.clear()
+  local native = term.current()
+  -- Every drawing call goes to both; sizes and colors come from the computer.
+  local both = {}
+  for k, f in pairs(native) do
+    if type(f) == "function" then
+      both[k] = function(...)
+        pcall(m[k], ...)
+        return f(...)
+      end
+    end
+  end
+  both.getSize = native.getSize
+  both.isColor = native.isColor
+  both.isColour = native.isColour
+  term.redirect(both)
+  log("mirroring to a %dx%d monitor", m.getSize())
+end
+
 -- A line of numbers 5 times a second while flying, once a second otherwise.
 local function sampleLoop()
   while true do
@@ -1224,7 +1331,8 @@ log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_G
   tostring(FORWARD_POWER), tostring(THRUST_RAMP), tostring(ALT_HOLD), tostring(CLIMB_SPEED),
   tostring(LIFT_GAIN), tostring(LIFT_LEARN), tostring(MANUAL_LIFT_STEP))
 
-local ok, err = xpcall(function() parallel.waitForAny(liftLoop, ui, sampleLoop) end, debug.traceback)
+pcall(mirrorToMonitor)
+local ok, err = xpcall(function() parallel.waitForAny(liftLoop, ui, sampleLoop, touchLoop) end, debug.traceback)
 log("stopped: %s", ok and "ok" or tostring(err))
 if logFile then logFile.close() end
 -- Thrusters and turning off; the lift stays where it is so the ship doesn't drop.
