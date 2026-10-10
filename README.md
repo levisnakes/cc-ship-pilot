@@ -24,7 +24,7 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 | A / D | turn left / right thrusters |
 | Space | up |
 | Left Shift | down (hold it on the ground to land and switch the lift off) |
-| ↑ / ↓ arrows | throttle: forward power 0-15, one step per tap. It starts at 5 every time you open Fly (Start throttle in Tuning). W fires at this power. |
+| ↑ / ↓ arrows | throttle: forward power 0-15, one step per tap. It starts at 5 every time you open Fly (Start throttle in Tuning). W fires at this power. You can also set it on the Fly screen: tap **[-]** / **[+]**, tap a cell of the throttle bar to jump to that level, or press - / + on the computer. |
 
 Change them in the **Keybinds** menu. The typewriter only passes on movement keys (WASD, Space, Shift) by itself; for the arrow keys, bind each to a Redstone Link frequency on the typewriter first (any spare frequency), then check them in **T (Typewriter test)**.
 

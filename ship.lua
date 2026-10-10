@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "2.9.0"
+VERSION = "2.10.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -527,10 +527,10 @@ end
 
 -- Colors on an advanced computer; plain text on a basic one.
 local COLOR = term.isColor ~= nil and term.isColor() == true
-local W = 51
+local W, H = 51, 19
 do
-  local ok, w = pcall(term.getSize)
-  if ok and type(w) == "number" then W = w end
+  local ok, w, h = pcall(term.getSize)
+  if ok and type(w) == "number" then W, H = w, h or 19 end
 end
 local C = {
   bar = colors.blue, key = colors.yellow, head = colors.lightBlue, dim = colors.lightGray,
@@ -622,6 +622,71 @@ local function keyLine(k, text, note)
 end
 local function onOff(v) return v and { C.good, "ON " } or { C.dim, "off" } end
 
+-- What the ship is doing, for the badge in the title bar.
+local function liftBadge()
+  if lift.mode == "off" then
+    if lift.status == "landed" then return "LANDED", colors.gray end
+    return "PARKED", colors.gray
+  end
+  local st = lift.status or ""
+  if st:find("climb") or st == "more lift" then return "CLIMB", colors.cyan end
+  if st:find("descend") or st == "less lift" then return "DESCEND", colors.orange end
+  return "HOVER", colors.green
+end
+
+-- A button: " K label " on a grey background. The key letter is yellow.
+-- action: { char = } or { key = } or { event = , value = }
+local function chip(x, y, k, label, action, color)
+  term.setCursorPos(x, y)
+  local text = (k ~= "" and (" " .. k) or "") .. (label ~= "" and (" " .. label) or "") .. " "
+  if COLOR then
+    bg(color or colors.gray)
+    write(" ")
+    if k ~= "" then fg(C.key) write(k) fg(colors.white) end
+    if label ~= "" then write((k ~= "" and " " or "") .. label) end
+    write(" ")
+    bg(colors.black)
+  else
+    text = "[" .. (k ~= "" and k or "") .. (label ~= "" and ((k ~= "" and " " or "") .. label) or "") .. "]"
+    write(text)
+  end
+  buttons[#buttons + 1] = { x1 = x, x2 = x + #text - 1, y = y,
+    char = action and action.char, key = action and action.key,
+    event = action and action.event, value = action and action.value }
+  return x + #text + 1
+end
+
+-- The button bar along the bottom: { { "Q", "Back", { char = "q" } }, ... }
+local function footer(items)
+  local cx, cy = cursor()
+  term.setCursorPos(1, H)
+  bg(colors.black)
+  term.clearLine()
+  local x = 2
+  for _, it in ipairs(items) do
+    if it[3] then x = chip(x, H, it[1], it[2], it[3]) else
+      term.setCursorPos(x, H) fg(C.dim) write(it[2]) fg(colors.white)
+      x = x + #it[2] + 1
+    end
+  end
+  if cx then term.setCursorPos(cx, cy) end
+end
+
+-- A big two-line tile for the menu.
+local function tile(x, y, w, k, title, desc)
+  if COLOR then
+    bg(colors.gray)
+    for row = y, y + 1 do term.setCursorPos(x, row) write(string.rep(" ", w)) end
+    term.setCursorPos(x + 1, y) fg(C.key) write(k) fg(colors.white) write("  " .. title)
+    term.setCursorPos(x + 1, y + 1) fg(colors.lightGray) write(desc:sub(1, w - 2))
+    fg(colors.white) bg(colors.black)
+  else
+    term.setCursorPos(x, y) write("[" .. k .. "] " .. title)
+    term.setCursorPos(x + 1, y + 1) write(desc:sub(1, w - 2))
+  end
+  buttons[#buttons + 1] = { x1 = x, x2 = x + w - 1, y1 = y, y2 = y + 1, char = k:lower() }
+end
+
 local currentScreen = nil
 local function screen(title)
   buttons = {}
@@ -633,10 +698,12 @@ local function screen(title)
   term.setTextColor(colors.white)
   term.clear()
   term.setCursorPos(1, 1)
+  local badge, bcol = liftBadge()
+  local left = COLOR and (" Ship Pilot  \16 " .. title) or (" Ship Pilot > " .. title)
+  local right = COLOR and (" " .. badge .. " ") or ("[" .. badge .. "]")
   bg(C.bar)
-  local left, right = " Ship Pilot  \16 " .. title, "v" .. VERSION .. " "
-  if not COLOR then left = " Ship Pilot > " .. title end
-  write(left .. string.rep(" ", math.max(1, W - #left - #right)) .. right)
+  write(left .. string.rep(" ", math.max(1, W - #left - #right)))
+  bg(bcol) fg(colors.white) write(right)
   bg(colors.black)
   term.setCursorPos(1, 3)
 end
@@ -684,7 +751,16 @@ local function flyScreen()
   end
   while true do
     local ev, a = os.pullEvent()
-    if ev == "char" and a:lower() == "q" then break end
+    -- Throttle from the screen: - / + on the computer, or tap the bar.
+    if ev == "char" then
+      local c = a:lower()
+      if c == "q" then break
+      elseif c == "+" or c == "=" then stepThrottle(1)
+      elseif c == "-" then stepThrottle(-1) end
+    elseif ev == "throttle_set" and type(a) == "number" then
+      FORWARD_POWER = clamp(a, 0, 15)
+      log("throttle -> %d (tapped)", FORWARD_POWER)
+    end
     if ev == "timer" and a == timer then
       local t = now()
       local dt = math.min(t - last, 0.5)
@@ -724,14 +800,29 @@ local function flyScreen()
       local gp = function(g) return math.floor(groupPower[g] + 0.5) end
       out(" Keys      ", #names > 0 and { C.key, table.concat(names, ", ") } or { C.dim, "none held" })
       print("")
-      out(" Throttle  ", meter(FORWARD_POWER, 15, 15, C.key), string.format(" %2d/15", math.floor(FORWARD_POWER + 0.5)),
-        { C.dim, "  arrows" })
+      -- Throttle: [-] bar [+]; tap a cell to jump to that level.
+      local thr = math.floor(FORWARD_POWER + 0.5)
+      local _, ty = cursor()
+      ty = ty or 5
+      term.setCursorPos(2, ty) write("Throttle ") fg(C.key) write(string.format("%2d", thr)) fg(colors.white)
+      local cx = chip(14, ty, "-", "", { char = "-" })
+      for i = 1, 15 do
+        term.setCursorPos(cx + (i - 1) * 2, ty)
+        if COLOR then
+          bg(i <= thr and C.key or colors.gray) write(" ") bg(colors.black) write(" ")
+        else
+          write(i <= thr and "#" or "-") write(" ")
+        end
+        buttons[#buttons + 1] = { x1 = cx + (i - 1) * 2, x2 = cx + (i - 1) * 2 + 1, y = ty, event = "throttle_set", value = i }
+      end
+      chip(cx + 30, ty, "+", "", { char = "+" })
+      term.setCursorPos(1, ty + 1)
       out(" Forward   ", meter(gp("forward"), 15, 10), string.format(" %2d", gp("forward")),
         "   Back    ", meter(gp("back"), 15, 10), string.format(" %2d", gp("back")))
       out(" Turn L    ", meter(gp("left"), 15, 10), string.format(" %2d", gp("left")),
         "   Turn R  ", meter(gp("right"), 15, 10), string.format(" %2d", gp("right")))
       print("")
-      out(" Lift      ", meter(shift, 256, 15, C.head), string.format(" %3d/256  ", math.floor(shift + 0.5)),
+      out(" Lift      ", meter(shift, 256, 11, C.head), string.format(" %3d/256  ", math.floor(shift + 0.5)),
         { C.dim, lift.status })
       if alt then
         out(" Height    ", string.format("%.1f", alt), "   ",
@@ -743,7 +834,8 @@ local function flyScreen()
       end
       if relayError then out({ C.bad, " Relay error: " .. relayError }) end
       print("")
-      out(" ", { C.key, "Q" }, " Menu", { C.dim, "  (the ship keeps hovering)" })
+      footer({ { "Q", "Menu", { char = "q" } }, { "-", "Slower", { char = "-" } }, { "+", "Faster", { char = "+" } },
+        { "", "ship keeps hovering" } })
       timer = os.startTimer(0.05)
     end
   end
@@ -775,7 +867,7 @@ local function typewriterTest()
     out(" Held now  ", #heldNames > 0 and { C.key, table.concat(heldNames, " ") } or { C.dim, "-" })
     print("")
     hint(" Keys from the computer keyboard show orange.")
-    hint(" Q on the computer: back to the menu")
+    footer({ { "Q", "Back", { char = "q" } } })
     local timer = os.startTimer(0.25)
     local ev, a = os.pullEvent()
     if ev == "key" then
@@ -795,9 +887,8 @@ local function keybinds()
       out(" ", { C.key, tostring(i) }, string.format("  %-11s ", act.label), { C.head, cfg.keys[act.id] })
     end
     print("")
-    keyLine("1-8", "change a key")
-    keyLine("R", "reset all to defaults")
-    keyLine("Q", "back to the menu")
+    hint(" Tap an action (or press 1-8) to change its key.")
+    footer({ { "R", "Reset to defaults", { char = "r" } }, { "Q", "Back", { char = "q" } } })
     local ch = waitChar("12345678rq")
     if ch == "q" then return end
     if ch == "r" then
@@ -812,7 +903,7 @@ local function keybinds()
       hint(" The typewriter only passes on movement keys")
       hint(" and keys bound to a Redstone Link frequency.")
       print("")
-      hint(" Q on the computer to cancel")
+      footer({ { "Q", "Cancel", { char = "q" } } })
       while true do
         local ev, a = os.pullEvent()
         if ev == "char" and a:lower() == "q" then break end
@@ -860,7 +951,7 @@ local function gearshiftSetup()
     out(" ", { C.key, "L" }, "  turn left   ", { C.dim, describe(cfg.moves.left) })
     out(" ", { C.key, "R" }, "  turn right  ", { C.dim, describe(cfg.moves.right) })
     out(" ", { C.key, "B" }, "  backward    ", { C.dim, describe(cfg.moves.back) })
-    out(" ", { C.key, "C" }, "  all off     ", { C.key, "Q" }, "  done")
+    footer({ { "C", "All off", { char = "c" } }, { "Q", "Done", { char = "q" } } })
     if relayError then out({ C.bad, " Relay error: " .. relayError }) end
     local ch = waitChar("123456789lrbcq")
     local n = tonumber(ch)
@@ -917,8 +1008,7 @@ local function hoverCalibration()
       out(" Lift      ", meter(shift, 256, 15, C.head), string.format(" %3d/256", math.floor(shift + 0.5)))
       out(" Vertical  ", { math.abs(vy) < 0.15 and C.good or C.warn, string.format("%+.2f b/s", vy) })
       out(" Steady    ", meter(steady, 5, 15), string.format(" %.1f / 5 s", math.min(steady, 5)))
-      print("")
-      hint(" Q on the computer to stop")
+      footer({ { "Q", "Stop", { char = "q" } } })
       if steady >= 5 then
         cfg.hover = math.floor(lift.hover + 0.5)
         saveConfig()
@@ -954,10 +1044,8 @@ local function hoverCalibration()
     print("")
     out(" Lift  ", meter(level, 256, 20, C.head), string.format(" %3d/256", math.floor(level + 0.5)))
     print("")
-    keyLine("+ / -", "change by 8")
-    keyLine("] / [", "change by 1")
-    keyLine("Enter", "save this as the hover level")
-    keyLine("Q", "cancel")
+    footer({ { "-", "8", { char = "-" } }, { "[", "1", { char = "[" } }, { "]", "1", { char = "]" } },
+      { "+", "8", { char = "+" } }, { "Enter", "Save", { key = keys.enter } }, { "Q", "Cancel", { char = "q" } } })
     local ev, a = os.pullEvent()
     if ev == "char" then
       if a == "+" or a == "=" then level = level + 8
@@ -994,8 +1082,8 @@ local function manualTest()
     heading(" Thrusters and lift")
     out(" ", { C.key, "T" }, string.format("  forward thrusters (%d)  ", #forwardT), onOff(thrustOn))
     out(" ", { C.key, "+/-" }, "  lift  ", meter(shift, 256, 15, C.head), string.format(" %3d/256", math.floor(shift + 0.5)))
-    print("")
-    keyLine("Q", "back", "relays and thrusters off")
+    footer({ { "T", "Thrust", { char = "t" } }, { "-", "Lift", { char = "-" } }, { "+", "Lift", { char = "+" } },
+      { "Q", "Back", { char = "q" } }, { "", "(all off)" } })
     local ch = waitChar("123456t+=-q")
     local n = tonumber(ch)
     if n and r then
@@ -1077,8 +1165,9 @@ local function tuning()
     print("")
     for _, line in ipairs(TUNE[sel].help) do hint(" " .. line) end
     print("")
-    out(" ", { C.key, "1-9" }, " pick  ", { C.key, "+/-" }, " change  ", { C.key, "D" }, " default  ", { C.key, "Q" }, " back")
     hint(" " .. liftLine())
+    footer({ { "-", "Lower", { char = "-" } }, { "+", "Raise", { char = "+" } }, { "D", "Default", { char = "d" } },
+      { "Q", "Back", { char = "q" } } })
     local timer = os.startTimer(0.5)
     local ev, a = os.pullEvent()
     os.cancelTimer(timer)
@@ -1120,14 +1209,15 @@ local function thrusterSetup()
     hint(" it can have several, e.g. turn left + backward.")
     out(" ", { C.key, "W" }, " forward  ", { C.key, "S" }, " backward  ", { C.key, "A" }, " turn left  ",
       { C.key, "D" }, " turn right")
-    out(" ", { C.key, "U" }, " lift     ", { C.key, "O" }, " off       ", { C.key, "X" }, " all lift   ",
-      { C.key, "T" }, " test-fire")
+    out(" ", { C.key, "U" }, " lift     ", { C.key, "O" }, " off")
+    local items = { { "T", "Test-fire", { char = "t" } }, { "X", "All lift", { char = "x" } } }
     if #thrusters > 9 then
-      out(" ", { C.key, "N/P" }, string.format(" next/previous page (%d of %d)", page + 1, math.ceil(#thrusters / 9)),
-        "   ", { C.key, "Q" }, " back")
-    else
-      keyLine("Q", "back")
+      items[#items + 1] = { "P", "", { char = "p" } }
+      items[#items + 1] = { "", string.format("%d/%d", page + 1, math.ceil(#thrusters / 9)) }
+      items[#items + 1] = { "N", "", { char = "n" } }
     end
+    items[#items + 1] = { "Q", "Back", { char = "q" } }
+    footer(items)
     local ch = waitChar("123456789wsaduotxnpq")
     local n = tonumber(ch)
     local t = thrusters[sel]
@@ -1182,19 +1272,30 @@ local function menu()
     out(" Typewriter ", typewriter and { C.good, "connected" } or { C.bad, "MISSING" },
       "   Height ", onSable and { C.good, "Sable" } or { C.warn, "none" },
       #relays > 0 and { C.dim, string.format("   %d relay%s", #relays, #relays == 1 and "" or "s") } or "")
-    out(" Thrusters  ", { C.head, string.format("%d lift  %d fwd  %d back  %d+%d turn", #liftT, #group.forward,
-      #group.back, #group.left, #group.right) })
-    if unset > 0 then out(" ", { C.warn, string.format("%d thruster%s without a job - press P", unset, unset == 1 and "" or "s") }) end
-    if transmission then hint(" Lift transmission connected") end
-    out(" Hover      ", cfg.hover and string.format("%d/256", cfg.hover) or { C.warn, "not calibrated - press H" })
-    out(" Lift       ", meter(shift, 256, 12, C.head), " ", { C.dim, lift.status },
+    if unset > 0 then
+      out(" Thrusters  ", { C.warn, string.format("%d without a job - tap Thrusters", unset) })
+    else
+      out(" Thrusters  ", { C.head, string.format("%d lift  %d fwd  %d back  %d+%d turn", #liftT, #group.forward,
+        #group.back, #group.left, #group.right) })
+    end
+    out(" Hover      ", cfg.hover and string.format("%d/256", cfg.hover) or { C.warn, "not calibrated - tap Hover" },
+      transmission and { C.dim, "   (lift transmission)" } or "")
+    out(" Lift       ", meter(shift, 256, 14, C.head), " ", { C.dim, lift.status },
       alt and { C.dim, string.format("  y %.1f", alt) } or "")
-    print("")
-    out(" ", { C.head, "Fly   " }, "  ", { C.key, "F" }, " Fly")
-    out(" ", { C.head, "Setup " }, "  ", { C.key, "P" }, " Thrusters   ", { C.key, "H" }, " Hover      ", { C.key, "K" }, " Keybinds")
-    out("         ", { C.key, "U" }, " Tuning      ", { C.key, "G" }, " Gearshifts")
-    out(" ", { C.head, "Test  " }, "  ", { C.key, "T" }, " Typewriter  ", { C.key, "M" }, " Manual")
-    if relayError then print("") out({ C.bad, " Relay error: " .. relayError }) end
+
+    local L, R, w = 2, 27, 24
+    tile(L, 8, w, "F", "Fly", "fly with typewriter")
+    tile(R, 8, w, "P", "Thrusters", "jobs for each thruster")
+    tile(L, 11, w, "H", "Hover", "calibrate hovering")
+    tile(R, 11, w, "U", "Tuning", "power, speed, response")
+    tile(L, 14, w, "K", "Keybinds", "typewriter keys")
+    tile(R, 14, w, "G", "Gearshifts", "optional relay turning")
+    tile(L, 17, w, "T", "Typewriter test", "see what keys arrive")
+    tile(R, 17, w, "M", "Manual test", "relays, thrust, lift")
+    term.setCursorPos(2, H)
+    if relayError then
+      fg(C.bad) write(("Relay error: " .. relayError):sub(1, W - 2)) fg(colors.white)
+    end
     local ch = waitChar("ftkghupm")
     if ch == "f" then flyScreen()
     elseif ch == "t" then typewriterTest()
@@ -1241,11 +1342,13 @@ local function touchLoop()
     if ev == "mouse_click" or ev == "monitor_touch" then
       local hit = nil
       for _, b in ipairs(buttons) do
-        if y == b.y and x >= b.x1 and x <= b.x2 then hit = b break end
+        if y >= (b.y1 or b.y) and y <= (b.y2 or b.y) and x >= b.x1 and x <= b.x2 then hit = b break end
       end
       if hit then
-        log("tap %d,%d -> %s", x, y, hit.char or "enter")
-        if hit.key then os.queueEvent("key", hit.key, false) else os.queueEvent("char", hit.char) end
+        log("tap %d,%d -> %s", x, y, hit.char or hit.event or "enter")
+        if hit.event then os.queueEvent(hit.event, hit.value)
+        elseif hit.key then os.queueEvent("key", hit.key, false)
+        elseif hit.char then os.queueEvent("char", hit.char) end
       elseif tapAnywhere then
         os.queueEvent("char", " ")
       end
