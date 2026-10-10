@@ -30,12 +30,13 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
 -- there is saved in ship.cfg and overrides the values below.
 
+START_THROTTLE = 5      -- throttle each time Fly opens (0-15)
 FORWARD_POWER = 15      -- throttle: thruster power while forward is held (0-15);
                         -- the faster/slower keys change it while flying
 BACK_POWER = 15         -- backward thrusters' power (0-15)
@@ -668,14 +669,16 @@ end
 local function flyScreen()
   if not typewriter then screen("Fly") print("No Linked Typewriter found.") pause() return end
   local last, timer = now(), os.startTimer(0.05)
-  -- Throttle keys: one step per tap, repeating while held.
-  local throttleDir, nextRepeat, throttleChanged = 0, 0, false
+  -- The throttle starts at START_THROTTLE every time, and the arrow keys
+  -- move it one step per tap only: no repeating, so a key that looks stuck
+  -- down can't run it to 0.
+  FORWARD_POWER = clamp(math.floor(START_THROTTLE + 0.5), 0, 15)
+  log("throttle starts at %d", FORWARD_POWER)
+  local throttleDir = 0
   local function stepThrottle(dir)
     local v = clamp(math.floor(FORWARD_POWER + 0.5) + dir, 0, 15)
     if v ~= FORWARD_POWER then
       FORWARD_POWER = v
-      cfg.tune.FORWARD_POWER = v
-      throttleChanged = true
       log("throttle -> %d", v)
     end
   end
@@ -687,16 +690,9 @@ local function flyScreen()
       local dt = math.min(t - last, 0.5)
       last = t
       local dir = (down("faster") and 1 or 0) - (down("slower") and 1 or 0)
-      if dir ~= 0 and dir ~= throttleDir then
-        stepThrottle(dir)
-        throttleDir, nextRepeat = dir, t + 0.4
-      elseif dir ~= 0 and t >= nextRepeat then
-        stepThrottle(dir)
-        nextRepeat = t + 0.1
-      elseif dir == 0 then
-        throttleDir = 0
-        -- Save once the key is let go, not on every step.
-        if throttleChanged then saveConfig() throttleChanged = false end
+      if dir ~= throttleDir then
+        if dir ~= 0 then stepThrottle(dir) end
+        throttleDir = dir
       end
       -- Each thruster group spools toward its power while its key is held.
       local turnL = down("left") and not down("right")
@@ -751,7 +747,6 @@ local function flyScreen()
       timer = os.startTimer(0.05)
     end
   end
-  if throttleChanged then saveConfig() end
   lift.updown = 0
   allThrustOff()
   applyMove(nil)
@@ -1026,8 +1021,8 @@ end
 
 -- Settings you can change from the computer, saved in ship.cfg.
 local TUNE = {
-  { name = "FORWARD_POWER", label = "Forward power", step = 1, min = 0, max = 15,
-    help = { "Thruster power while forward is held." } },
+  { name = "START_THROTTLE", label = "Start throttle", step = 1, min = 0, max = 15,
+    help = { "Throttle each time Fly opens. The arrow", "keys change it while flying." } },
   { name = "BACK_POWER", label = "Backward power", step = 1, min = 0, max = 15,
     help = { "Backward thrusters' power." } },
   { name = "TURN_POWER", label = "Turning power", step = 1, min = 0, max = 15,
