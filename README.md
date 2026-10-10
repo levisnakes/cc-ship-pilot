@@ -24,8 +24,9 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 | A / D | turn left / right |
 | Space | up |
 | Left Shift | down (hold it on the ground to land and switch the lift off) |
+| ↑ / ↓ arrows | throttle: forward power 0-15, one step per tap (repeats while held). W fires at this power. |
 
-Change them in the **Keybinds** menu.
+Change them in the **Keybinds** menu. The typewriter only passes on movement keys (WASD, Space, Shift) by itself; for the arrow keys, bind each to a Redstone Link frequency on the typewriter first (any spare frequency), then check them in **T (Typewriter test)**.
 
 ## Menu (on the computer)
 

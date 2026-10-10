@@ -1,7 +1,8 @@
 -- Ship Pilot: fly a Create Aeronautics ship from a Linked Typewriter.
 --
 -- Starts in a menu on the computer:
---   F  fly (keys on the typewriter, default W A S D, Space, Left Shift)
+--   F  fly (keys on the typewriter, default W A S D, Space, Left Shift,
+--      Up/Down arrows for the throttle)
 --   T  typewriter test: shows the last key pressed
 --   K  keybinds: change which typewriter key does what
 --   G  gearshift setup: switch relay sides and save what turns/reverses
@@ -24,13 +25,14 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
 -- there is saved in ship.cfg and overrides the values below.
 
-FORWARD_POWER = 15      -- thruster power while forward is held (0-15)
+FORWARD_POWER = 15      -- throttle: thruster power while forward is held (0-15);
+                        -- the faster/slower keys change it while flying
 THRUST_RAMP = 30        -- how fast thrusters spool up and down (power per second)
 ALT_HOLD = true         -- hold height on a Sable ship (needs CC: Sable)
 CLIMB_SPEED = 4         -- blocks per second up or down while the key is held
@@ -57,8 +59,11 @@ local ACTIONS = {
   { id = "right",   label = "Turn right" },
   { id = "up",      label = "Up" },
   { id = "down",    label = "Down" },
+  { id = "faster",  label = "Faster" },
+  { id = "slower",  label = "Slower" },
 }
-local DEFAULT_KEYS = { forward = "w", back = "s", left = "a", right = "d", up = "space", down = "leftShift" }
+local DEFAULT_KEYS = { forward = "w", back = "s", left = "a", right = "d", up = "space", down = "leftShift",
+  faster = "up", slower = "down" }
 
 local function clamp(v, lo, hi)
   if v < lo then return lo elseif v > hi then return hi end
@@ -475,6 +480,17 @@ end
 local function flyScreen()
   if not typewriter then screen("Fly") print("No Linked Typewriter found.") pause() return end
   local last, timer = now(), os.startTimer(0.05)
+  -- Throttle keys: one step per tap, repeating while held.
+  local throttleDir, nextRepeat, throttleChanged = 0, 0, false
+  local function stepThrottle(dir)
+    local v = clamp(math.floor(FORWARD_POWER + 0.5) + dir, 0, 15)
+    if v ~= FORWARD_POWER then
+      FORWARD_POWER = v
+      cfg.tune.FORWARD_POWER = v
+      throttleChanged = true
+      log("throttle -> %d", v)
+    end
+  end
   while true do
     local ev, a = os.pullEvent()
     if ev == "char" and a:lower() == "q" then break end
@@ -482,6 +498,18 @@ local function flyScreen()
       local t = now()
       local dt = math.min(t - last, 0.5)
       last = t
+      local dir = (down("faster") and 1 or 0) - (down("slower") and 1 or 0)
+      if dir ~= 0 and dir ~= throttleDir then
+        stepThrottle(dir)
+        throttleDir, nextRepeat = dir, t + 0.4
+      elseif dir ~= 0 and t >= nextRepeat then
+        stepThrottle(dir)
+        nextRepeat = t + 0.1
+      elseif dir == 0 then
+        throttleDir = 0
+        -- Save once the key is let go, not on every step.
+        if throttleChanged then saveConfig() throttleChanged = false end
+      end
       local want = down("forward") and FORWARD_POWER or 0
       local step = THRUST_RAMP * dt
       thrust = thrust + clamp(want - thrust, -step, step)
@@ -498,7 +526,8 @@ local function flyScreen()
       local names = {}
       for _, act in ipairs(ACTIONS) do if down(act.id) then names[#names + 1] = act.label end end
       print("Keys:   " .. (#names > 0 and table.concat(names, ", ") or "-"))
-      print(string.format("Thrust: %d/15 (%d forward thrusters)", math.floor(thrust + 0.5), #forwardT))
+      print(string.format("Throttle: %d/15   Thrust now: %d (%d thruster%s)", math.floor(FORWARD_POWER + 0.5),
+        math.floor(thrust + 0.5), #forwardT, #forwardT == 1 and "" or "s"))
       print("Move:   " .. (currentMove or "-") .. (currentMove and (" (" .. describe(cfg.moves[currentMove]) .. ")") or ""))
       if relayError then print("Relay error: " .. relayError) end
       print(liftLine())
@@ -509,6 +538,7 @@ local function flyScreen()
       timer = os.startTimer(0.05)
     end
   end
+  if throttleChanged then saveConfig() end
   lift.updown, thrust = 0, 0
   setThrusters(0)
   applyMove(nil)
@@ -557,9 +587,9 @@ local function keybinds()
       print(string.format("%d  %-11s %s", i, act.label, cfg.keys[act.id]))
     end
     print("")
-    print("1-6 change a key, R reset to defaults,")
+    print("1-8 change a key, R reset to defaults,")
     print("Q back to the menu")
-    local ch = waitChar("123456rq")
+    local ch = waitChar("12345678rq")
     if ch == "q" then return end
     if ch == "r" then
       for id, name in pairs(DEFAULT_KEYS) do cfg.keys[id] = name end
