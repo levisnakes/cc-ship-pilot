@@ -26,6 +26,7 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 | Left Shift | down (hold it on the ground to land and switch the lift off) |
 | ↑ / ↓ arrows | throttle: forward power 0-15, one step per tap. It starts at 5 every time you open Fly (Start throttle in Tuning). W fires at this power. You can also set it on the Fly screen: tap **[-]** / **[+]**, tap a cell of the throttle bar to jump to that level, or press - / + on the computer. |
 | Left Ctrl | **boost**: full forward power (15) while held, whatever the throttle; spools up twice as fast. |
+| Fly screen: Turning row | turning thrusters' power (default 5): tap [-] / [+] or the bar, or press [ / ] on the computer. Saved between flights. |
 
 Change them in the **Keybinds** menu.
 

@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "3.5.0"
+VERSION = "3.6.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -40,7 +40,7 @@ START_THROTTLE = 5      -- throttle each time Fly opens (0-15)
 FORWARD_POWER = 15      -- throttle: thruster power while forward is held (0-15);
                         -- the faster/slower keys change it while flying
 BACK_POWER = 15         -- backward thrusters' power (0-15)
-TURN_POWER = 15         -- turning thrusters' power (0-15)
+TURN_POWER = 5          -- turning thrusters' power (0-15); also set on the Fly screen
 THRUST_RAMP = 30        -- how fast thrusters spool up and down (power per second)
 ALT_HOLD = true         -- hold height on a Sable ship (needs CC: Sable)
 CLIMB_SPEED = 4         -- blocks per second up or down while the key is held
@@ -216,6 +216,11 @@ local function loadConfig()
   end
   cfg.tune = cfg.tune or {}
   cfg.roles = cfg.roles or {}
+  -- v3.6: turning thrusters were far too strong at 15; start everyone at 5 once.
+  if not cfg.turnPower36 then
+    cfg.turnPower36 = true
+    cfg.tune.TURN_POWER = 5
+  end
   for name, v in pairs(cfg.tune) do _ENV[name] = v end
 end
 
@@ -1097,6 +1102,11 @@ local function flyScreen()
       if c == "q" then break
       elseif c == "+" or c == "=" then stepThrottle(1)
       elseif c == "-" then stepThrottle(-1)
+      elseif c == "[" or c == "]" then
+        TURN_POWER = clamp(math.floor(TURN_POWER + 0.5) + (c == "]" and 1 or -1), 1, 15)
+        cfg.tune.TURN_POWER = TURN_POWER
+        saveConfig()
+        log("turning power -> %d", TURN_POWER)
       elseif c == "x" then
         muteAlarm()
       elseif c == "m" then
@@ -1105,6 +1115,11 @@ local function flyScreen()
         saveConfig()
         log("smart mode %s", cfg.smartOn and "on" or "off")
       end
+    elseif ev == "turn_set" and type(a) == "number" then
+      TURN_POWER = clamp(a, 1, 15)
+      cfg.tune.TURN_POWER = TURN_POWER
+      saveConfig()
+      log("turning power -> %d (tapped)", TURN_POWER)
     elseif ev == "throttle_set" and type(a) == "number" then
       FORWARD_POWER = clamp(a, 0, 15)
       log("throttle -> %d (tapped)", FORWARD_POWER)
@@ -1232,7 +1247,22 @@ local function flyScreen()
           buttons[#buttons + 1] = { x1 = cx + (i - 1) * 2, x2 = cx + (i - 1) * 2 + 1, y = ty, event = "throttle_set", value = i }
         end
         chip(cx + 30, ty, "+", "", { char = "+" })
-        term.setCursorPos(1, ty + 1)
+        -- Turning power: same control, saved between flights.
+        local tp = math.floor(TURN_POWER + 0.5)
+        local ry = ty + 1
+        term.setCursorPos(2, ry) write("Turning  ") fg(C.head) write(string.format("%2d", tp)) fg(colors.white)
+        local rx = chip(14, ry, "-", "", { char = "[" })
+        for i = 1, 15 do
+          term.setCursorPos(rx + (i - 1) * 2, ry)
+          if COLOR then
+            bg(i <= tp and C.head or colors.gray) write(" ") bg(colors.black) write(" ")
+          else
+            write(i <= tp and "#" or "-") write(" ")
+          end
+          buttons[#buttons + 1] = { x1 = rx + (i - 1) * 2, x2 = rx + (i - 1) * 2 + 1, y = ry, event = "turn_set", value = i }
+        end
+        chip(rx + 30, ry, "+", "", { char = "]" })
+        term.setCursorPos(1, ry + 1)
         out(" Forward   ", meter(gp("forward"), 15, 10), string.format(" %2d", gp("forward")),
           "   Back    ", meter(gp("back"), 15, 10), string.format(" %2d", gp("back")))
         out(" Turn L    ", meter(gp("left"), 15, 10), string.format(" %2d", gp("left")),
