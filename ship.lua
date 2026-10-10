@@ -26,7 +26,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -520,16 +520,75 @@ end
 
 -- ---------- screens ----------
 
+-- Colors on an advanced computer; plain text on a basic one.
+local COLOR = term.isColor ~= nil and term.isColor() == true
+local W = 51
+do
+  local ok, w = pcall(term.getSize)
+  if ok and type(w) == "number" then W = w end
+end
+local C = {
+  bar = colors.blue, key = colors.yellow, head = colors.lightBlue, dim = colors.lightGray,
+  good = colors.lime, bad = colors.red, warn = colors.orange, sel = colors.gray,
+}
+local function fg(c) if COLOR then term.setTextColor(c) end end
+local function bg(c) if COLOR then term.setBackgroundColor(c) end end
+
+-- A bar: filled part in color, rest grey ([###---] without color).
+local function meter(v, max, width, col)
+  return function()
+    local n = math.floor(clamp((v or 0) / max, 0, 1) * width + 0.5)
+    if COLOR then
+      bg(col or C.good) write(string.rep(" ", n))
+      bg(colors.gray) write(string.rep(" ", width - n))
+      bg(colors.black)
+    else
+      -- Brackets count toward the width so lines fit either way.
+      local inner = width - 2
+      local m = math.floor(clamp((v or 0) / max, 0, 1) * inner + 0.5)
+      write("[" .. string.rep("#", m) .. string.rep("-", inner - m) .. "]")
+    end
+  end
+end
+
+-- One line from pieces: "text", { color, "text" } or a meter.
+local function out(...)
+  for _, part in ipairs({ ... }) do
+    if type(part) == "table" then
+      fg(part[1]) write(part[2]) fg(colors.white)
+    elseif type(part) == "function" then
+      part()
+    else
+      write(tostring(part))
+    end
+  end
+  print("")
+end
+
+local function heading(text) out({ C.head, text }) end
+local function hint(text) out({ C.dim, text }) end
+-- " K  text  note" with the key in yellow.
+local function keyLine(k, text, note)
+  out(" ", { C.key, k }, "  ", text, note and { C.dim, "  " .. note } or "")
+end
+local function onOff(v) return v and { C.good, "ON " } or { C.dim, "off" } end
+
 local currentScreen = nil
 local function screen(title)
   if title ~= currentScreen then
     currentScreen = title
     log("screen: %s", title)
   end
+  term.setBackgroundColor(colors.black)
+  term.setTextColor(colors.white)
   term.clear()
   term.setCursorPos(1, 1)
-  print("Ship Pilot v" .. VERSION .. " - " .. title)
-  print("")
+  bg(C.bar)
+  local left, right = " Ship Pilot  \16 " .. title, "v" .. VERSION .. " "
+  if not COLOR then left = " Ship Pilot > " .. title end
+  write(left .. string.rep(" ", math.max(1, W - #left - #right)) .. right)
+  bg(colors.black)
+  term.setCursorPos(1, 3)
 end
 
 local function waitChar(allowed)
@@ -545,7 +604,7 @@ end
 
 local function pause(msg)
   print("")
-  print(msg or "Press any key.")
+  hint(msg or "Press any key.")
   os.pullEvent("char")
 end
 
@@ -615,20 +674,29 @@ local function flyScreen()
       screen("Fly")
       local names = {}
       for _, act in ipairs(ACTIONS) do if down(act.id) then names[#names + 1] = act.label end end
-      print("Keys:   " .. (#names > 0 and table.concat(names, ", ") or "-"))
-      print(string.format("Throttle: %d/15", math.floor(FORWARD_POWER + 0.5)))
-      print(string.format("Thrust: fwd %d  back %d  turn L %d  R %d",
-        math.floor(groupPower.forward + 0.5), math.floor(groupPower.back + 0.5),
-        math.floor(groupPower.left + 0.5), math.floor(groupPower.right + 0.5)))
-      if #relays > 0 then
-        print("Relays: " .. (currentMove or "-") .. (currentMove and (" (" .. describe(cfg.moves[currentMove]) .. ")") or ""))
-      end
-      if relayError then print("Relay error: " .. relayError) end
-      print(liftLine())
-      if #velSensors > 0 then print("Speed sensor: " .. velText()) end
+      local gp = function(g) return math.floor(groupPower[g] + 0.5) end
+      out(" Keys      ", #names > 0 and { C.key, table.concat(names, ", ") } or { C.dim, "none held" })
       print("")
-      print("Press Q on the computer for the menu.")
-      print("The ship keeps hovering there.")
+      out(" Throttle  ", meter(FORWARD_POWER, 15, 15, C.key), string.format(" %2d/15", math.floor(FORWARD_POWER + 0.5)),
+        { C.dim, "  arrows" })
+      out(" Forward   ", meter(gp("forward"), 15, 10), string.format(" %2d", gp("forward")),
+        "   Back    ", meter(gp("back"), 15, 10), string.format(" %2d", gp("back")))
+      out(" Turn L    ", meter(gp("left"), 15, 10), string.format(" %2d", gp("left")),
+        "   Turn R  ", meter(gp("right"), 15, 10), string.format(" %2d", gp("right")))
+      print("")
+      out(" Lift      ", meter(shift, 256, 15, C.head), string.format(" %3d/256  ", math.floor(shift + 0.5)),
+        { C.dim, lift.status })
+      if alt then
+        out(" Height    ", string.format("%.1f", alt), "   ",
+          { math.abs(vy) < 0.3 and C.good or C.warn, string.format("%+.1f b/s", vy) })
+      end
+      if #velSensors > 0 then out(" Speed     ", velText(), { C.dim, "  (sensor)" }) end
+      if #relays > 0 and currentMove then
+        out(" Relays    ", currentMove, { C.dim, " (" .. describe(cfg.moves[currentMove]) .. ")" })
+      end
+      if relayError then out({ C.bad, " Relay error: " .. relayError }) end
+      print("")
+      hint(" Q on the computer: menu (the ship keeps hovering)")
       timer = os.startTimer(0.05)
     end
   end
@@ -642,26 +710,26 @@ local function typewriterTest()
   local lastKey = nil
   while true do
     screen("Typewriter test")
-    print("Press keys on the typewriter.")
+    out(" Press keys on the ", { C.key, "typewriter" }, ".")
     print("")
     if lastKey then
-      print(string.format("Last key: %s (code %d)", keyName(lastKey.code), lastKey.code))
-      print("From:     " .. lastKey.from)
-      local bound = "-"
+      out(" Last key  ", { C.key, keyName(lastKey.code) }, { C.dim, string.format("  (code %d)", lastKey.code) })
+      out(" From      ", { lastKey.from == "typewriter" and C.good or C.warn, lastKey.from })
+      local bound = nil
       for _, act in ipairs(ACTIONS) do
         if keys[cfg.keys[act.id]] == lastKey.code then bound = act.label end
       end
-      print("Does:     " .. bound)
+      out(" Does      ", bound or { C.dim, "nothing (not bound)" })
     else
-      print("Last key: (none yet)")
+      out(" Last key  ", { C.dim, "none yet" })
     end
     local heldNames = {}
     for c in pairs(twHeld) do heldNames[#heldNames + 1] = keyName(c) end
     table.sort(heldNames)
+    out(" Held now  ", #heldNames > 0 and { C.key, table.concat(heldNames, " ") } or { C.dim, "-" })
     print("")
-    print("Held now: " .. (#heldNames > 0 and table.concat(heldNames, " ") or "-"))
-    print("")
-    print("Q on the computer: back to the menu")
+    hint(" Keys from the computer keyboard show orange.")
+    hint(" Q on the computer: back to the menu")
     local timer = os.startTimer(0.25)
     local ev, a = os.pullEvent()
     if ev == "key" then
@@ -678,11 +746,12 @@ local function keybinds()
   while true do
     screen("Keybinds")
     for i, act in ipairs(ACTIONS) do
-      print(string.format("%d  %-11s %s", i, act.label, cfg.keys[act.id]))
+      out(" ", { C.key, tostring(i) }, string.format("  %-11s ", act.label), { C.head, cfg.keys[act.id] })
     end
     print("")
-    print("1-8 change a key, R reset to defaults,")
-    print("Q back to the menu")
+    keyLine("1-8", "change a key")
+    keyLine("R", "reset all to defaults")
+    keyLine("Q", "back to the menu")
     local ch = waitChar("12345678rq")
     if ch == "q" then return end
     if ch == "r" then
@@ -691,13 +760,13 @@ local function keybinds()
     else
       local act = ACTIONS[tonumber(ch)]
       screen("Keybinds")
-      print("Press the new key for " .. act.label)
-      print("on the TYPEWRITER.")
+      out(" Press the new key for ", { C.key, act.label })
+      out(" on the ", { C.key, "typewriter" }, ".")
       print("")
-      print("It only passes on movement keys and")
-      print("keys bound to a link frequency.")
+      hint(" The typewriter only passes on movement keys")
+      hint(" and keys bound to a Redstone Link frequency.")
       print("")
-      print("Q on the computer to cancel")
+      hint(" Q on the computer to cancel")
       while true do
         local ev, a = os.pullEvent()
         if ev == "char" and a:lower() == "q" then break end
@@ -712,8 +781,8 @@ local function keybinds()
             saveConfig()
             break
           elseif a ~= keys.q then
-            print("That was the computer keyboard;")
-            print("press it on the typewriter.")
+            out({ C.warn, " That was the computer keyboard;" })
+            out({ C.warn, " press it on the typewriter." })
           end
         end
       end
@@ -736,17 +805,17 @@ local function gearshiftSetup()
   local on = {}
   while true do
     screen("Gearshift setup")
-    print("Switch sides until the ship does what")
-    print("you want, then save it. Best hovering.")
+    hint(" Switch relay sides until the ship does what you")
+    hint(" want, then save it. Easiest while hovering.")
     for i, o in ipairs(list) do
-      print(string.format(" %d  %-20s %s", i, (#relays > 1 and (o.relay .. " ") or "") .. o.side, on[i] and "ON" or "off"))
+      out(" ", { C.key, tostring(i) }, string.format("  %-20s ", (#relays > 1 and (o.relay .. " ") or "") .. o.side), onOff(on[i]))
     end
-    print("Save what's ON as:")
-    print(" L  turn left:  " .. describe(cfg.moves.left))
-    print(" R  turn right: " .. describe(cfg.moves.right))
-    print(" B  backward:   " .. describe(cfg.moves.back))
-    print(" C  all off     Q  done")
-    if relayError then print("Relay error: " .. relayError) end
+    heading(" Save what's ON as:")
+    out(" ", { C.key, "L" }, "  turn left   ", { C.dim, describe(cfg.moves.left) })
+    out(" ", { C.key, "R" }, "  turn right  ", { C.dim, describe(cfg.moves.right) })
+    out(" ", { C.key, "B" }, "  backward    ", { C.dim, describe(cfg.moves.back) })
+    out(" ", { C.key, "C" }, "  all off     ", { C.key, "Q" }, "  done")
+    if relayError then out({ C.bad, " Relay error: " .. relayError }) end
     local ch = waitChar("123456789lrbcq")
     local n = tonumber(ch)
     if n and list[n] then
@@ -773,8 +842,9 @@ end
 local function hoverCalibration()
   if not liftAvailable() then
     screen("Hover calibration")
-    print("Nothing to lift with: mark lift thrusters")
-    print("in Thruster setup (P) first.")
+    out({ C.warn, " Nothing to lift with." })
+    hint(" Give some thrusters the lift job in")
+    hint(" Thruster setup (P) first.")
     pause()
     return
   end
@@ -795,25 +865,29 @@ local function hoverCalibration()
       last = t
       if math.abs(vy) < 0.15 and math.abs(alt - target) < 0.6 then steady = steady + dt else steady = 0 end
       screen("Hover calibration")
-      print(string.format("Holding height %.1f (now %.1f)", target, alt))
-      print(string.format("Lift %d/256, vertical speed %+.2f", math.floor(shift + 0.5), vy))
-      print(string.format("Steady for %.1f of 5 seconds", steady))
+      hint(" Holding a height until the lift settles.")
       print("")
-      print("Q on the computer to stop")
+      out(" Target    ", string.format("%.1f", target), { C.dim, string.format("   now %.1f", alt) })
+      out(" Lift      ", meter(shift, 256, 15, C.head), string.format(" %3d/256", math.floor(shift + 0.5)))
+      out(" Vertical  ", { math.abs(vy) < 0.15 and C.good or C.warn, string.format("%+.2f b/s", vy) })
+      out(" Steady    ", meter(steady, 5, 15), string.format(" %.1f / 5 s", math.min(steady, 5)))
+      print("")
+      hint(" Q on the computer to stop")
       if steady >= 5 then
         cfg.hover = math.floor(lift.hover + 0.5)
         saveConfig()
         log("hover calibration: saved %d", cfg.hover)
         screen("Hover calibration")
-        print(string.format("Hover level saved: %d/256", cfg.hover))
+        out(" ", { C.good, "Saved!" }, string.format("  Hover level %d/256", cfg.hover))
         pause()
         return
       end
       if t - started > 90 then
         screen("Hover calibration")
         log("hover calibration: didn't settle (alt %.2f target %.2f vy %.2f shift %d)", alt, target, vy, shift)
-        print("It didn't settle in 90 seconds.")
-        print("Nothing was changed.")
+        out({ C.warn, " It didn't settle in 90 seconds." })
+        hint(" Nothing was changed. Try lowering Lift response")
+        hint(" or Hover learning in Tuning (U).")
         pause()
         return
       end
@@ -829,11 +903,15 @@ local function hoverCalibration()
   while true do
     setShift(level)
     screen("Hover calibration (by hand)")
-    print(string.format("Lift: %d/256", math.floor(level + 0.5)))
+    hint(" No height reading: raise the lift until the ship")
+    hint(" just floats, then save it.")
     print("")
-    print("+ / -  change by 8     ] / [  change by 1")
-    print("Enter  save this as the hover level")
-    print("Q      cancel")
+    out(" Lift  ", meter(level, 256, 20, C.head), string.format(" %3d/256", math.floor(level + 0.5)))
+    print("")
+    keyLine("+ / -", "change by 8")
+    keyLine("] / [", "change by 1")
+    keyLine("Enter", "save this as the hover level")
+    keyLine("Q", "cancel")
     local ev, a = os.pullEvent()
     if ev == "char" then
       if a == "+" or a == "=" then level = level + 8
@@ -862,13 +940,16 @@ local function manualTest()
   while true do
     screen("Manual test")
     if r then
+      heading(" Relay " .. r)
       for i, side in ipairs(RELAY_SIDES) do
-        print(string.format("%d  %s side %-7s %s", i, r, side, on[side] and "ON" or "off"))
+        out(" ", { C.key, tostring(i) }, string.format("  %-8s ", side), onOff(on[side]))
       end
     end
-    print(string.format("T  forward thrusters (%d)  %s", #forwardT, thrustOn and "ON" or "off"))
-    print(string.format("+/-  lift %d/256", math.floor(shift + 0.5)))
-    print("Q  back (relays and thrusters off)")
+    heading(" Thrusters and lift")
+    out(" ", { C.key, "T" }, string.format("  forward thrusters (%d)  ", #forwardT), onOff(thrustOn))
+    out(" ", { C.key, "+/-" }, "  lift  ", meter(shift, 256, 15, C.head), string.format(" %3d/256", math.floor(shift + 0.5)))
+    print("")
+    keyLine("Q", "back", "relays and thrusters off")
     local ch = waitChar("123456t+=-q")
     local n = tonumber(ch)
     if n and r then
@@ -942,13 +1023,16 @@ local function tuning()
     screen("Tuning")
     for i, t in ipairs(TUNE) do
       local v = tuneValue(t)
-      print(string.format("%s%d %-17s %s", i == sel and ">" or " ", i, t.label, v and tostring(v) or "-"))
+      if i == sel then bg(C.sel) end
+      out(i == sel and "\16" or " ", { C.key, tostring(i) }, string.format(" %-17s ", t.label),
+        v and { C.head, tostring(v) } or { C.dim, "-" }, string.rep(" ", 12))
+      bg(colors.black)
     end
     print("")
-    for _, line in ipairs(TUNE[sel].help) do print(line) end
+    for _, line in ipairs(TUNE[sel].help) do hint(" " .. line) end
     print("")
-    print("1-9 pick  +/- change  D default  Q back")
-    print(liftLine())
+    out(" ", { C.key, "1-9" }, " pick  ", { C.key, "+/-" }, " change  ", { C.key, "D" }, " default  ", { C.key, "Q" }, " back")
+    hint(" " .. liftLine())
     local timer = os.startTimer(0.5)
     local ev, a = os.pullEvent()
     os.cancelTimer(timer)
@@ -978,18 +1062,26 @@ local function thrusterSetup()
     for i = 1, 9 do
       local t = thrusters[first + i]
       if t then
-        print(string.format("%s%d %-14s %s", sel == first + i and ">" or " ", i, t.name, roleText(t)))
+        local r = roleOf(t)
+        local col = r == "lift" and C.head or r == "move" and C.good or r == "unset" and C.warn or C.dim
+        if sel == first + i then bg(C.sel) end
+        out(sel == first + i and "\16" or " ", { C.key, tostring(i) }, string.format(" %-14s ", t.name),
+          { col, roleText(t) }, string.rep(" ", 6))
+        bg(colors.black)
       end
     end
-    print("1-9 pick, then switch its jobs on/off")
-    print("(it can have several, e.g. turn+back):")
-    print(" W forward  S backward  A turn left")
-    print(" D turn right   U lift   O off")
-    print("T test-fire picked (1 s)   X all lift")
+    hint(" Pick one (1-9), then switch its jobs on/off;")
+    hint(" it can have several, e.g. turn left + backward.")
+    out(" ", { C.key, "W" }, " forward  ", { C.key, "S" }, " backward  ", { C.key, "A" }, " turn left  ",
+      { C.key, "D" }, " turn right")
+    out(" ", { C.key, "U" }, " lift     ", { C.key, "O" }, " off       ", { C.key, "X" }, " all lift   ",
+      { C.key, "T" }, " test-fire")
     if #thrusters > 9 then
-      print(string.format("N / P next / previous page (%d of %d)", page + 1, math.ceil(#thrusters / 9)))
+      out(" ", { C.key, "N/P" }, string.format(" next/previous page (%d of %d)", page + 1, math.ceil(#thrusters / 9)),
+        "   ", { C.key, "Q" }, " back")
+    else
+      keyLine("Q", "back")
     end
-    print("Q back")
     local ch = waitChar("123456789wsaduotxnpq")
     local n = tonumber(ch)
     local t = thrusters[sel]
@@ -1039,25 +1131,24 @@ end
 local function menu()
   while true do
     screen("Menu")
-    print(string.format("Typewriter %s, %d relays%s", typewriter and "ok" or "MISSING", #relays, onSable and ", Sable ship" or ""))
     local unset = 0
     for _, t in ipairs(thrusters) do if roleOf(t) == "unset" then unset = unset + 1 end end
-    print(string.format("Thrusters: %d lift, %d fwd, %d back, %d+%d turn", #liftT, #group.forward,
-      #group.back, #group.left, #group.right))
-    if unset > 0 then print(unset .. " thruster(s) NOT SET UP - press P") end
-    if transmission then print("Lift transmission connected") end
-    print("Hover level: " .. (cfg.hover and (cfg.hover .. "/256") or "not calibrated"))
-    print(liftLine())
+    out(" Typewriter ", typewriter and { C.good, "connected" } or { C.bad, "MISSING" },
+      "   Height ", onSable and { C.good, "Sable" } or { C.warn, "none" },
+      #relays > 0 and { C.dim, string.format("   %d relay%s", #relays, #relays == 1 and "" or "s") } or "")
+    out(" Thrusters  ", { C.head, string.format("%d lift  %d fwd  %d back  %d+%d turn", #liftT, #group.forward,
+      #group.back, #group.left, #group.right) })
+    if unset > 0 then out(" ", { C.warn, string.format("%d thruster%s without a job - press P", unset, unset == 1 and "" or "s") }) end
+    if transmission then hint(" Lift transmission connected") end
+    out(" Hover      ", cfg.hover and string.format("%d/256", cfg.hover) or { C.warn, "not calibrated - press H" })
+    out(" Lift       ", meter(shift, 256, 12, C.head), " ", { C.dim, lift.status },
+      alt and { C.dim, string.format("  y %.1f", alt) } or "")
     print("")
-    print("F  Fly")
-    print("T  Typewriter test")
-    print("K  Keybinds")
-    print("G  Gearshift setup (turning/backward)")
-    print("H  Hover calibration")
-    print("U  Tuning")
-    print("P  Thruster setup (lift/move/turn)")
-    print("M  Manual test")
-    if relayError then print("Relay error: " .. relayError) end
+    out(" ", { C.head, "Fly   " }, "  ", { C.key, "F" }, " Fly")
+    out(" ", { C.head, "Setup " }, "  ", { C.key, "P" }, " Thrusters   ", { C.key, "H" }, " Hover      ", { C.key, "K" }, " Keybinds")
+    out("         ", { C.key, "U" }, " Tuning      ", { C.key, "G" }, " Gearshifts")
+    out(" ", { C.head, "Test  " }, "  ", { C.key, "T" }, " Typewriter  ", { C.key, "M" }, " Manual")
+    if relayError then print("") out({ C.bad, " Relay error: " .. relayError }) end
     local ch = waitChar("ftkghupm")
     if ch == "f" then flyScreen()
     elseif ch == "t" then typewriterTest()
