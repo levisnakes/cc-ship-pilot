@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "3.9.0"
+VERSION = "4.0.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -44,6 +44,9 @@ TURN_POWER = 5          -- turning thrusters' power (0-15); also set on the Fly 
 THRUST_RAMP = 30        -- how fast thrusters spool up and down (power per second)
 ALT_HOLD = true         -- hold height on a Sable ship (needs CC: Sable)
 CLIMB_SPEED = 8         -- blocks per second up or down while the key is held
+DOWN_POWER = 15         -- most power the down thrusters use (0-15)
+DOWN_GAIN = 3           -- holding height: down power per block/s too fast upward (lift already at 0)
+PULSE_TICKS = 1         -- Q pulse: how many game ticks the relay signal drops for
 LIFT_GAIN = 20          -- lift change per block/s of vertical speed error
 LIFT_LEARN = 8          -- how fast it fine-tunes the hover level
 -- Without altitude hold: how far up/down keys move the lift from the hover level.
@@ -89,9 +92,10 @@ local ACTIONS = {
   { id = "faster",  label = "Faster" },
   { id = "slower",  label = "Slower" },
   { id = "boost",   label = "Boost" },
+  { id = "pulse",   label = "Q pulse" },
 }
 local DEFAULT_KEYS = { forward = "w", back = "s", left = "a", right = "d", up = "space", down = "leftShift",
-  faster = "up", slower = "down", boost = "leftCtrl" }
+  faster = "up", slower = "down", boost = "leftCtrl", pulse = "q" }
 
 local function clamp(v, lo, hi)
   if v < lo then return lo elseif v > hi then return hi end
@@ -246,10 +250,34 @@ local function setOutput(o, on)
   end
 end
 
+-- The Q pulse output: a relay side that's always on, except for a tick
+-- each time Q is pressed on the typewriter.
+local function isPulse(o)
+  return cfg.pulse ~= nil and o.relay == cfg.pulse.relay and o.side == cfg.pulse.side
+end
+local function pulseOn()
+  if cfg.pulse then setOutput(cfg.pulse, true) end
+end
+
 local function allRelaysOff()
   for _, r in ipairs(relays) do
-    for _, side in ipairs(RELAY_SIDES) do setOutput({ relay = r, side = side }, false) end
+    for _, side in ipairs(RELAY_SIDES) do
+      local o = { relay = r, side = side }
+      if not isPulse(o) then setOutput(o, false) end
+    end
   end
+end
+
+local pulsing, lastPulse, pulseMissingAt = false, nil, nil
+local function pulse()
+  if not cfg.pulse or pulsing then return end
+  pulsing = true
+  outState[cfg.pulse.relay .. ":" .. cfg.pulse.side] = nil
+  setOutput(cfg.pulse, false)
+  sleep(0.05 * math.max(1, PULSE_TICKS))
+  setOutput(cfg.pulse, true)
+  pulsing, lastPulse = false, now()
+  log("Q pulse sent")
 end
 
 local currentMove = nil
@@ -275,11 +303,12 @@ end
 -- Unmarked ones push forward when there's a transmission for lift.
 -- Movement thruster groups, fired by their keys while flying.
 local GROUPS = { "forward", "back", "left", "right" }
-local ROLE_LABEL = { lift = "lift", forward = "forward", back = "backward", left = "turn left",
+local ROLE_LABEL = { lift = "lift", down = "down", forward = "forward", back = "backward", left = "turn left",
   right = "turn right", off = "off", unset = "NOT SET" }
 local MOVE = { forward = true, back = true, left = true, right = true }
 local group = { forward = {}, back = {}, left = {}, right = {} }
 local forwardT, liftT, moveT = group.forward, {}, {}
+local downT = {}
 
 -- A thruster is "lift", "off", or has one or more movement jobs (e.g.
 -- turn left AND backward), saved as a list.
@@ -295,7 +324,7 @@ local function rolesOf(t)   -- set of movement jobs
   end
   return set
 end
-local function roleOf(t)    -- "lift", "off", "move" or "unset"
+local function roleOf(t)    -- "lift", "down", "off", "move" or "unset"
   local r = rawRole(t)
   if type(r) == "table" then return #r > 0 and "move" or "unset" end
   if MOVE[r] then return "move" end
@@ -310,11 +339,13 @@ local function roleText(t)
 end
 local function sortThrusters()
   group = { forward = {}, back = {}, left = {}, right = {} }
-  liftT, moveT = {}, {}
+  liftT, moveT, downT = {}, {}, {}
   for _, t in ipairs(thrusters) do
     local r = roleOf(t)
     if r == "lift" then
       liftT[#liftT + 1] = t
+    elseif r == "down" then
+      downT[#downT + 1] = t
     elseif r == "move" then
       t.jobs = rolesOf(t)
       moveT[#moveT + 1] = t
@@ -410,6 +441,25 @@ local function setShift(v)
       if not ok then log("transmission setShiftLevel(%d) FAILED: %s", s, tostring(err)) end
     end
   end
+end
+
+-- Down thrusters: push the ship down, all at the same power.
+local downPower = 0
+local downSent = {}
+local function setDown(p)
+  p = math.floor(clamp(p, 0, 15) + 0.5)
+  if p ~= downPower then
+    if p == 0 or downPower == 0 then log("down thrusters -> %d", p) end
+    downPower = p
+  end
+  local calls = {}
+  for _, t in ipairs(downT) do
+    if downSent[t.name] ~= p then
+      downSent[t.name] = p
+      calls[#calls + 1] = powerCall(t, p)
+    end
+  end
+  callAll(calls)
 end
 
 -- ---------- typewriter keys ----------
@@ -519,7 +569,10 @@ local function liftStep(dt)
   -- lift.updown in the meantime.
   local ud = lift.updown
   if lift.mode == "off" then
-    if ud <= 0 then return end
+    if ud <= 0 then
+      if downPower > 0 then setDown(0) end
+      return
+    end
     -- Take off: start from the saved hover level.
     lift.mode = "fly"
     lift.hover = math.max(shift, cfg.hover or 0)
@@ -541,14 +594,30 @@ local function liftStep(dt)
         lift.mode, lift.status, lift.landedSince = "off", "landed", nil
         log("lift: landed, lift off")
         setShift(0)
+        setDown(0)
+        lift.preDownHover = nil
         return
       end
     else
       lift.landedSince = nil
     end
     local err = want - vy
-    lift.hover = clamp(lift.hover + LIFT_LEARN * err * dt, 0, 256)
+    -- Down thrusters: full power while Down is held (the lift still sets
+    -- the speed), and a push when even no lift at all can't hold the height.
+    -- The hover level learned while they push is thrown away afterwards.
+    local down = 0
+    if #downT > 0 and ud < 0 then
+      down = DOWN_POWER
+      lift.preDownHover = lift.preDownHover or lift.hover
+    elseif #downT > 0 and err < 0 and lift.hover + LIFT_GAIN * err < 0 then
+      down = clamp(-err * DOWN_GAIN, 0, DOWN_POWER)
+    end
+    if ud >= 0 and lift.preDownHover then
+      lift.hover, lift.preDownHover = lift.preDownHover, nil
+    end
+    if down == 0 or ud < 0 then lift.hover = clamp(lift.hover + LIFT_LEARN * err * dt, 0, 256) end
     setShift(lift.hover + LIFT_GAIN * err)
+    setDown(down)
     -- Remember the hover level once it has held steady for a while.
     if ud == 0 and math.abs(vy) < 0.2 then
       lift.steadySince = lift.steadySince or now()
@@ -565,10 +634,12 @@ local function liftStep(dt)
     end
     lift.status = ud > 0 and "climbing" or ud < 0 and "descending"
       or string.format("hovering at %.1f", lift.holdAlt or alt)
+    if downPower > 0 then lift.status = lift.status .. " (down " .. downPower .. ")" end
   else
     local base = cfg.hover or lift.hover or shift
     lift.hover = base
     setShift(base + ud * MANUAL_LIFT_STEP)
+    setDown(ud < 0 and #downT > 0 and DOWN_POWER or 0)
     lift.status = ud > 0 and "more lift" or ud < 0 and "less lift" or "hover level"
   end
 end
@@ -1062,11 +1133,17 @@ local function screen(title)
   term.setCursorPos(1, 3)
 end
 
+-- A character typed on the typewriter (not the computer's keyboard).
+local function typewriterChar(ch)
+  local code = keys[ch]
+  return code ~= nil and type(code) == "number" and fromTypewriter(code)
+end
+
 local function waitChar(allowed)
   while true do
     local _, ch = os.pullEvent("char")
     ch = ch:lower()
-    if not allowed or allowed:find(ch, 1, true) then
+    if (not allowed or allowed:find(ch, 1, true)) and not typewriterChar(ch) then
       log("computer key: %s", ch)
       return ch
     end
@@ -1126,6 +1203,7 @@ local function flyScreen()
   end
   while true do
     local ev, a, b = os.pullEvent()
+    if ev == "char" and typewriterChar(a:lower()) then ev = "typewriter_char" end
     if ev == "char" then
       local c = a:lower()
       if c == "q" then break
@@ -1335,6 +1413,10 @@ local function flyScreen()
           end
         end
         if relayError then msgs[#msgs + 1] = { { C.bad, " Relay error: " .. relayError } } end
+        if lastPulse and now() - lastPulse < 1.5 then msgs[#msgs + 1] = { { C.head, " Q pulse sent" } } end
+        if pulseMissingAt and now() - pulseMissingAt < 3 then
+          msgs[#msgs + 1] = { { C.warn, " Q pulse: no relay side set (Gearshifts, X)" } }
+        end
         if not throttleSeen then
           msgs[#msgs + 1] = { { C.dim, " Arrows/Ctrl: bind them to a link frequency on" } }
           msgs[#msgs + 1] = { { C.dim, " the typewriter (sneak + right-click it)." } }
@@ -1394,18 +1476,18 @@ local function keybinds()
   while true do
     screen("Keybinds")
     for i, act in ipairs(ACTIONS) do
-      out(" ", { C.key, tostring(i) }, string.format("  %-11s ", act.label), { C.head, cfg.keys[act.id] })
+      out(" ", { C.key, tostring(i % 10) }, string.format("  %-11s ", act.label), { C.head, cfg.keys[act.id] })
     end
     print("")
-    hint(" Tap an action (or press 1-9) to change its key.")
+    hint(" Tap an action (or press 0-9) to change its key.")
     footer({ { "R", "Reset to defaults", { char = "r" } }, { "Q", "Back", { char = "q" } } })
-    local ch = waitChar("123456789rq")
+    local ch = waitChar("1234567890rq")
     if ch == "q" then return end
     if ch == "r" then
       for id, name in pairs(DEFAULT_KEYS) do cfg.keys[id] = name end
       saveConfig()
     else
-      local act = ACTIONS[tonumber(ch)]
+      local act = ACTIONS[ch == "0" and 10 or tonumber(ch)]
       screen("Keybinds")
       out(" Press the new key for ", { C.key, act.label })
       out(" on the ", { C.key, "typewriter" }, ".")
@@ -1438,51 +1520,106 @@ local function keybinds()
 end
 
 -- Switch relay sides by hand until the ship does what you want, then save
--- that combination as turn left, turn right or backward.
+-- that combination as turn left, turn right or backward - or one side as
+-- the Q pulse output.
 local function gearshiftSetup()
   if nav then navStop("opened " .. "gearshiftSetup") end
   landing = false
   if #relays == 0 then screen("Gearshift setup") print("No Redstone Relay found.") pause() return end
   local list = {}
   for _, r in ipairs(relays) do
-    for _, side in ipairs(RELAY_SIDES) do
-      if #list < 9 then list[#list + 1] = { relay = r, side = side } end
-    end
+    for _, side in ipairs(RELAY_SIDES) do list[#list + 1] = { relay = r, side = side } end
+  end
+  local function key(o) return o.relay .. ":" .. o.side end
+  local on = {}
+  local function readOn()
+    on = {}
+    for i, o in ipairs(list) do on[i] = outState[key(o)] == true end
   end
   applyMove(nil)
   allRelaysOff()
-  local on = {}
+  readOn()
+  local page, pages = 0, math.ceil(#list / 9)
+  local note = nil
   while true do
     screen("Gearshift setup")
-    hint(" Switch relay sides until the ship does what you")
-    hint(" want, then save it. Easiest while hovering.")
-    for i, o in ipairs(list) do
-      out(" ", { C.key, tostring(i) }, string.format("  %-20s ", (#relays > 1 and (o.relay .. " ") or "") .. o.side), onOff(on[i]))
+    if relayError then out({ C.bad, " Relay error: " .. relayError:sub(1, W - 15) }) print("")
+    elseif note then out({ C.warn, " " .. note }) print("")
+    else
+      hint(" Switch relay sides until the ship does what you")
+      hint(" want, then save it. Easiest while hovering.")
     end
+    note = nil
+    local first = page * 9
+    for i = 1, 9 do
+      local o = list[first + i]
+      if o then
+        out(" ", { C.key, tostring(i) }, string.format("  %-20s ", (#relays > 1 and (o.relay .. " ") or "") .. o.side),
+          onOff(on[first + i]), isPulse(o) and { C.head, "  Q pulse" } or "")
+      end
+    end
+    term.setCursorPos(1, 14)
     heading(" Save what's ON as:")
     out(" ", { C.key, "L" }, "  turn left   ", { C.dim, describe(cfg.moves.left) })
     out(" ", { C.key, "R" }, "  turn right  ", { C.dim, describe(cfg.moves.right) })
     out(" ", { C.key, "B" }, "  backward    ", { C.dim, describe(cfg.moves.back) })
-    footer({ { "C", "All off", { char = "c" } }, { "Q", "Done", { char = "q" } } })
-    if relayError then out({ C.bad, " Relay error: " .. relayError }) end
-    local ch = waitChar("123456789lrbcq")
+    out(" ", { C.key, "X" }, "  Q pulse     ", { C.dim, cfg.pulse and describe({ cfg.pulse }) or "none" },
+      { C.dim, "  (one side; always on)" })
+    local items = { { "C", "All off", { char = "c" } } }
+    if pages > 1 then
+      items[#items + 1] = { "P", "", { char = "p" } }
+      items[#items + 1] = { "", string.format("%d/%d", page + 1, pages) }
+      items[#items + 1] = { "N", "", { char = "n" } }
+    end
+    items[#items + 1] = { "Q", "Done", { char = "q" } }
+    footer(items)
+    local ch = waitChar("123456789lrbxcnpq")
     local n = tonumber(ch)
-    if n and list[n] then
-      on[n] = not on[n]
-      setOutput(list[n], on[n])
+    if n and list[first + n] then
+      local i = first + n
+      on[i] = not on[i]
+      setOutput(list[i], on[i])
     elseif ch == "l" or ch == "r" or ch == "b" then
       local cur = {}
-      for i, o in ipairs(list) do if on[i] then cur[#cur + 1] = { relay = o.relay, side = o.side } end end
+      for i, o in ipairs(list) do
+        if on[i] and not isPulse(o) then cur[#cur + 1] = { relay = o.relay, side = o.side } end
+      end
       local id = ch == "l" and "left" or ch == "r" and "right" or "back"
       cfg.moves[id] = cur
       saveConfig()
       log("gearshift setup: saved %s = %s", id, describe(cur))
+    elseif ch == "x" then
+      local cur = {}
+      for i, o in ipairs(list) do if on[i] then cur[#cur + 1] = o end end
+      if #cur == 0 then
+        if cfg.pulse then log("gearshift setup: Q pulse removed") end
+        cfg.pulse = nil
+        saveConfig()
+        note = "Q pulse removed (switch one side on, then X)."
+      elseif #cur > 1 then
+        note = "Switch exactly one side on for the Q pulse."
+      else
+        cfg.pulse = { relay = cur[1].relay, side = cur[1].side }
+        -- It can't also be part of a move.
+        for id, mv in pairs(cfg.moves) do
+          local keep = {}
+          for _, o in ipairs(mv) do if not isPulse(o) then keep[#keep + 1] = o end end
+          cfg.moves[id] = keep
+        end
+        saveConfig()
+        log("gearshift setup: Q pulse = %s", describe({ cfg.pulse }))
+      end
     elseif ch == "c" then
-      on = {}
       allRelaysOff()
+      readOn()
+    elseif ch == "n" and page + 1 < pages then
+      page = page + 1
+    elseif ch == "p" and page > 0 then
+      page = page - 1
     elseif ch == "q" then
       allRelaysOff()
       outState = {}
+      pulseOn()
       return
     end
   end
@@ -1708,7 +1845,7 @@ local function thrusterSetup()
   landing = false
   if #thrusters == 0 then screen("Thruster setup") print("No thrusters found.") pause() return end
   local page, sel = 0, 1
-  local KEYROLE = { w = "forward", s = "back", a = "left", d = "right", u = "lift", o = "off" }
+  local KEYROLE = { w = "forward", s = "back", a = "left", d = "right", u = "lift", v = "down", o = "off" }
   while true do
     screen("Thruster setup")
     local first = page * 9
@@ -1716,7 +1853,7 @@ local function thrusterSetup()
       local t = thrusters[first + i]
       if t then
         local r = roleOf(t)
-        local col = r == "lift" and C.head or r == "move" and C.good or r == "unset" and C.warn or C.dim
+        local col = (r == "lift" or r == "down") and C.head or r == "move" and C.good or r == "unset" and C.warn or C.dim
         if sel == first + i then bg(C.sel) end
         out(sel == first + i and "\16" or " ", { C.key, tostring(i) }, string.format(" %-14s ", t.name),
           { col, roleText(t) }, string.rep(" ", 6))
@@ -1727,7 +1864,7 @@ local function thrusterSetup()
     hint(" it can have several, e.g. turn left + backward.")
     out(" ", { C.key, "W" }, " forward  ", { C.key, "S" }, " backward  ", { C.key, "A" }, " turn left  ",
       { C.key, "D" }, " turn right")
-    out(" ", { C.key, "U" }, " lift     ", { C.key, "O" }, " off")
+    out(" ", { C.key, "U" }, " lift     ", { C.key, "V" }, " down      ", { C.key, "O" }, " off")
     local items = { { "T", "Test-fire", { char = "t" } }, { "X", "All lift", { char = "x" } } }
     if #thrusters > 9 then
       items[#items + 1] = { "P", "", { char = "p" } }
@@ -1736,7 +1873,7 @@ local function thrusterSetup()
     end
     items[#items + 1] = { "Q", "Back", { char = "q" } }
     footer(items)
-    local ch = waitChar("123456789wsaduotxnpq")
+    local ch = waitChar("123456789wsaduvotxnpq")
     local n = tonumber(ch)
     local t = thrusters[sel]
     if n and thrusters[first + n] then
@@ -1773,7 +1910,8 @@ local function thrusterSetup()
       -- Start everything from a clean state with the new roles.
       for _, x in ipairs(thrusters) do pcall(x.p.setPower, 0) end
       sortThrusters()
-      liftSent, groupSent, thrusterSent = {}, {}, {}
+      liftSent, groupSent, thrusterSent, downSent = {}, {}, {}, {}
+      downPower = 0
       groupPower = { forward = 0, back = 0, left = 0, right = 0 }
       thrust = 0
       setShift(shift)
@@ -2062,7 +2200,7 @@ local function menu()
       out(" Thrusters  ", { C.warn, string.format("%d without a job - tap Thrusters", unset) })
     else
       out(" Thrusters  ", { C.head, string.format("%d lift  %d fwd  %d back  %d+%d turn", #liftT, #group.forward,
-        #group.back, #group.left, #group.right) })
+        #group.back, #group.left, #group.right) }, #downT > 0 and { C.head, string.format("  %d down", #downT) } or "")
     end
     out(" Hover      ", cfg.hover and string.format("%d/256", cfg.hover) or { C.warn, "not calibrated - tap Hover" },
       transmission and { C.dim, "   (lift transmission)" } or "")
@@ -2084,7 +2222,7 @@ local function menu()
     tile(L, 12, w, "H", "Hover", "calibrate hovering")
     tile(R, 12, w, "U", "Tuning", "power, speed, response")
     tile(L, 14, w, "K", "Keybinds", "typewriter keys")
-    tile(R, 14, w, "G", "Gearshifts", "optional relay turning")
+    tile(R, 14, w, "G", "Gearshifts", "relay turning, Q pulse")
     tile(L, 16, w, "T", "Typewriter test", "see what keys arrive")
     tile(R, 16, w, "M", "Manual test", "relays, thrust, lift")
     if REMOTE and remoteId then
@@ -2287,6 +2425,8 @@ end
 local args = { ... }
 loadConfig()
 sortThrusters()
+setDown(0)
+pulseOn()
 if #liftT > 0 then
   -- Already flying when the program starts (e.g. after a reboot): pick up
   -- the lift thrusters' current power and hover.
@@ -2410,13 +2550,35 @@ log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_G
 pcall(mirrorToMonitor)
 REMOTE = REMOTE and http ~= nil and http.websocket ~= nil
 if REMOTE then remoteId = loadRemoteId() log("website code %s", remoteId) end
-local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop, fuelLoop, alarmLoop, boostSoundLoop }
+-- Q on the typewriter (any screen but the key screens): the pulse output
+-- drops for PULSE_TICKS ticks. Once per press.
+local function pulseLoop()
+  local latchedAt = nil
+  while true do
+    local ev, code = os.pullEvent()
+    local pk = keys[cfg.keys.pulse]
+    if latchedAt and not twHeld[pk] and now() - latchedAt > 0.5 then latchedAt = nil end
+    if ev == "key" and code == pk and not latchedAt and currentScreen ~= "Keybinds"
+        and currentScreen ~= "Typewriter test" and fromTypewriter(code) then
+      latchedAt = now()
+      if cfg.pulse then pulse() else
+        pulseMissingAt = now()
+        log("Q pressed but no pulse output is set")
+      end
+    elseif ev == "key_up" and code == pk then
+      latchedAt = nil
+    end
+  end
+end
+
+local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop, fuelLoop, alarmLoop, boostSoundLoop, pulseLoop }
 if REMOTE then loops[#loops + 1] = remoteLoop loops[#loops + 1] = telemetryLoop end
 local ok, err = xpcall(function() parallel.waitForAny(table.unpack(loops)) end, debug.traceback)
 log("stopped: %s", ok and "ok" or tostring(err))
 if logFile then logFile.close() end
 -- Thrusters and turning off; the lift stays where it is so the ship doesn't drop.
 allThrustOff()
+pcall(setDown, 0)
 applyMove(nil)
 term.clear()
 term.setCursorPos(1, 1)

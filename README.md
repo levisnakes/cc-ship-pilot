@@ -26,11 +26,12 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 | Left Shift | down (hold it on the ground to land and switch the lift off) |
 | ↑ / ↓ arrows | throttle: forward power 0-15, one step per tap. It starts at 5 every time you open Fly (Start throttle in Tuning). W fires at this power. You can also set it on the Fly screen: tap **[-]** / **[+]**, tap a cell of the throttle bar to jump to that level, or press - / + on the computer. |
 | Left Ctrl | **boost** (hold): full forward power (15) while held, whatever the throttle; spools up twice as fast. With a speaker connected you hear a launch whoosh, an engine rumble while it's held, and a power-down note when you let go. |
+| Q | **Q pulse**: the Q pulse relay side (always on) drops for one game tick. Works from any screen except Keybinds and Typewriter test, once per press. Set the side in **G (Gearshifts)** with X. |
 | Fly screen: Turning row | turning thrusters' power (default 5): tap [-] / [+] or the bar, or press [ / ] on the computer. Saved between flights. |
 
 Change them in the **Keybinds** menu.
 
-**Arrow keys need a binding.** The typewriter only sends a key to the computer if that key is bound to a Redstone Link frequency on the typewriter; WASD, Space and Shift come bound; the arrow keys and Ctrl don't. Sneak + right-click the typewriter to open its configuration screen and give ↑, ↓ and Left Ctrl any frequency (they don't need to drive anything). Check them in **T (Typewriter test)**: they should show "From: typewriter". Until the program has seen them, the Fly screen reminds you. The throttle can always be set on the Fly screen too (tap [-] / [+] or the bar).
+**Arrow keys need a binding.** The typewriter only sends a key to the computer if that key is bound to a Redstone Link frequency on the typewriter; WASD, Space and Shift come bound; the arrow keys, Ctrl and Q don't. Sneak + right-click the typewriter to open its configuration screen and give ↑, ↓, Left Ctrl and Q any frequency (they don't need to drive anything). Check them in **T (Typewriter test)**: they should show "From: typewriter". Until the program has seen them, the Fly screen reminds you. The throttle can always be set on the Fly screen too (tap [-] / [+] or the bar).
 
 ## Menu (on the computer)
 
@@ -41,10 +42,10 @@ Everything on screen can be **tapped**: click a key letter or its label on an ad
 | F | Fly. Q on the computer goes back to the menu; the ship keeps hovering. |
 | T | Typewriter test: shows the last key pressed, its code, and whether it came from the typewriter or the computer keyboard. |
 | K | Keybinds: pick an action, then press the new key on the typewriter. The typewriter only passes on movement keys and keys bound to a link frequency. |
-| G | Gearshift setup: press 1-6 to switch each relay side on or off and watch the ship. When it turns left, press L to save whatever is on; R for turn right, B for backward. Any combination works, even a single side. Best done hovering. |
+| G | Gearshift setup: press 1-9 to switch each relay side on or off and watch the ship (N/P for more relays). When it turns left, press L to save whatever is on; R for turn right, B for backward. Any combination works, even a single side. Best done hovering. **X** saves the one side that's on as the **Q pulse** output: always on, off for a tick when Q is pressed (X with nothing on removes it). |
 | H | Hover calibration: holds a height 3 blocks above where it is and saves the lift level once it has been steady for 5 seconds. It also keeps fine-tuning that level while you fly. |
 | U | Tuning: change flight settings with + and -, live, each with a short explanation (see below). |
-| P | Thruster setup: pick a thruster (1-9, N/P for more pages) and switch its jobs on or off: **W** forward, **S** backward, **A** turn left, **D** turn right; or **U** lift, **O** off. A thruster can have several movement jobs, for example turn left *and* backward, and fires at the strongest one in use. X marks them all as lift; T test-fires the picked one for a second so you can see which it is. |
+| P | Thruster setup: pick a thruster (1-9, N/P for more pages) and switch its jobs on or off: **W** forward, **S** backward, **A** turn left, **D** turn right; or **U** lift, **V** down, **O** off. A thruster can have several movement jobs, for example turn left *and* backward, and fires at the strongest one in use. X marks them all as lift; T test-fires the picked one for a second so you can see which it is. |
 | A | Go to: autopilot to coordinates (needs Smart setup). |
 | S | Smart setup: learns how the thrusters turn and push the ship. |
 | M | Manual test: switch relay sides, the thrusters and the lift by hand. |
@@ -82,7 +83,7 @@ Everything connects to the computer over wired modems (right-click each modem to
 
 - **Linked Typewriter**
 - **Velocity Sensor** (optional): its reading shows on the Fly screen and goes in the log.
-- **Thrusters** (any Create Propulsion thruster). Give each a job in **P (Thruster setup)**: lift, forward, backward, turn left or turn right. Lift thrusters share the lift between them: each has 15 power steps, so 8 of them give 120 steps for smooth hovering. A big multiblock thruster is one peripheral; if it doesn't fire, put its modem on a different block of it.
+- **Thrusters** (any Create Propulsion thruster). Give each a job in **P (Thruster setup)**: lift, down, forward, backward, turn left or turn right. **Down** thrusters push the ship down: full power (DOWN_POWER, 15) while Shift is held, so it descends faster; the lift still keeps the speed at Climb speed. They also help when even zero lift can't stop the ship rising past the height it's holding. Lift thrusters share the lift between them: each has 15 power steps, so 8 of them give 120 steps for smooth hovering. A big multiblock thruster is one peripheral; if it doesn't fire, put its modem on a different block of it.
 - **Redstone Transmission** (optional, the old way): drives lift propellers instead of lift thrusters. The program switches it to incremental mode (0-256). **Remove any redstone wired to it**, or the two will fight.
 - **Redstone Relay + Directional Gearshifts** (optional, the old way of turning): one relay with a Redstone Link (transmitting) on four of its sides, each on its own frequency. Matching receiving links sit against the straight and reverse sides of the two Directional Gearshifts. Run **G (Gearshift setup)** and it works out which side does what.
 
