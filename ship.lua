@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.0.1"
+VERSION = "4.1.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -46,6 +46,7 @@ ALT_HOLD = true         -- hold height on a Sable ship (needs CC: Sable)
 CLIMB_SPEED = 8         -- blocks per second up or down while the key is held
 DOWN_POWER = 15         -- most power the down thrusters use (0-15)
 DOWN_GAIN = 3           -- holding height: down power per block/s too fast upward (lift already at 0)
+PULSE_LOCK = 1          -- up/down do nothing for this many seconds after a Q pulse (it holds height)
 PULSE_TICKS = 4         -- Q pulse: game ticks the signal drops for (set in Gearshifts with +/-)
 LIFT_GAIN = 20          -- lift change per block/s of vertical speed error
 LIFT_LEARN = 8          -- how fast it fine-tunes the hover level
@@ -269,14 +270,17 @@ local function allRelaysOff()
 end
 
 local pulsing, lastPulse, pulseMissingAt = false, nil, nil
+local upDownLockUntil = nil   -- no up/down until then (after a Q pulse)
 local function pulse()
   if not cfg.pulse or pulsing then return end
   pulsing = true
+  upDownLockUntil = math.huge   -- no up/down during the pulse...
   outState[cfg.pulse.relay .. ":" .. cfg.pulse.side] = nil
   setOutput(cfg.pulse, false)
   sleep(0.05 * math.max(1, cfg.pulseTicks or PULSE_TICKS))
   setOutput(cfg.pulse, true)
   pulsing, lastPulse = false, now()
+  upDownLockUntil = now() + PULSE_LOCK   -- ...or for PULSE_LOCK seconds after it
   log("Q pulse sent (%d ticks)", cfg.pulseTicks or PULSE_TICKS)
 end
 
@@ -568,6 +572,8 @@ local function liftStep(dt)
   -- Read once: setShift yields for a tick, and the screen can change
   -- lift.updown in the meantime.
   local ud = lift.updown
+  local locked = upDownLockUntil ~= nil and now() < upDownLockUntil
+  if locked then ud = 0 end
   if lift.mode == "off" then
     if ud <= 0 then
       if downPower > 0 then setDown(0) end
@@ -635,6 +641,7 @@ local function liftStep(dt)
     lift.status = ud > 0 and "climbing" or ud < 0 and "descending"
       or string.format("hovering at %.1f", lift.holdAlt or alt)
     if downPower > 0 then lift.status = lift.status .. " (down " .. downPower .. ")" end
+    if locked then lift.status = lift.status .. " - Q lock" end
   else
     local base = cfg.hover or lift.hover or shift
     lift.hover = base
