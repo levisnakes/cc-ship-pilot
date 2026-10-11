@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.0.0"
+VERSION = "4.0.1"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -46,7 +46,7 @@ ALT_HOLD = true         -- hold height on a Sable ship (needs CC: Sable)
 CLIMB_SPEED = 8         -- blocks per second up or down while the key is held
 DOWN_POWER = 15         -- most power the down thrusters use (0-15)
 DOWN_GAIN = 3           -- holding height: down power per block/s too fast upward (lift already at 0)
-PULSE_TICKS = 1         -- Q pulse: how many game ticks the relay signal drops for
+PULSE_TICKS = 4         -- Q pulse: game ticks the signal drops for (set in Gearshifts with +/-)
 LIFT_GAIN = 20          -- lift change per block/s of vertical speed error
 LIFT_LEARN = 8          -- how fast it fine-tunes the hover level
 -- Without altitude hold: how far up/down keys move the lift from the hover level.
@@ -274,10 +274,10 @@ local function pulse()
   pulsing = true
   outState[cfg.pulse.relay .. ":" .. cfg.pulse.side] = nil
   setOutput(cfg.pulse, false)
-  sleep(0.05 * math.max(1, PULSE_TICKS))
+  sleep(0.05 * math.max(1, cfg.pulseTicks or PULSE_TICKS))
   setOutput(cfg.pulse, true)
   pulsing, lastPulse = false, now()
-  log("Q pulse sent")
+  log("Q pulse sent (%d ticks)", cfg.pulseTicks or PULSE_TICKS)
 end
 
 local currentMove = nil
@@ -1563,8 +1563,10 @@ local function gearshiftSetup()
     out(" ", { C.key, "L" }, "  turn left   ", { C.dim, describe(cfg.moves.left) })
     out(" ", { C.key, "R" }, "  turn right  ", { C.dim, describe(cfg.moves.right) })
     out(" ", { C.key, "B" }, "  backward    ", { C.dim, describe(cfg.moves.back) })
-    out(" ", { C.key, "X" }, "  Q pulse     ", { C.dim, cfg.pulse and describe({ cfg.pulse }) or "none" },
-      { C.dim, "  (one side; always on)" })
+    local pt = cfg.pulseTicks or PULSE_TICKS
+    out(" ", { C.key, "X" }, "  Q pulse     ",
+      { C.dim, cfg.pulse and (cfg.pulse.relay:gsub("^redstone_", "") .. " " .. cfg.pulse.side) or "none" }, "  ",
+      { C.key, "+/-" }, string.format(" %d tick%s  ", pt, pt == 1 and "" or "s"), { C.key, "T" }, " test")
     local items = { { "C", "All off", { char = "c" } } }
     if pages > 1 then
       items[#items + 1] = { "P", "", { char = "p" } }
@@ -1573,7 +1575,7 @@ local function gearshiftSetup()
     end
     items[#items + 1] = { "Q", "Done", { char = "q" } }
     footer(items)
-    local ch = waitChar("123456789lrbxcnpq")
+    local ch = waitChar("123456789lrbxcnpq+=-t")
     local n = tonumber(ch)
     if n and list[first + n] then
       local i = first + n
@@ -1608,6 +1610,18 @@ local function gearshiftSetup()
         end
         saveConfig()
         log("gearshift setup: Q pulse = %s", describe({ cfg.pulse }))
+      end
+    elseif ch == "+" or ch == "=" or ch == "-" then
+      cfg.pulseTicks = clamp((cfg.pulseTicks or PULSE_TICKS) + (ch == "-" and -1 or 1), 1, 40)
+      saveConfig()
+      log("gearshift setup: Q pulse length %d ticks", cfg.pulseTicks)
+    elseif ch == "t" then
+      if not cfg.pulse then
+        note = "Set the Q pulse side first: one side on, then X."
+      else
+        pulse()
+        readOn()
+        note = "Test pulse sent."
       end
     elseif ch == "c" then
       allRelaysOff()
