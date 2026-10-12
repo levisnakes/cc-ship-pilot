@@ -20,7 +20,8 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 | Default key | Does |
 |---|---|
 | W | forward thrusters |
-| S | backward thrusters, at the throttle's power (up to Backward power in Tuning) |
+| S | backward thrusters, always at the throttle's power |
+| ← / → arrows | strafe left / right thrusters (sideways), at the throttle's power |
 | A / D | turn left / right thrusters |
 | Space | up |
 | Left Shift | down (hold it on the ground to land and switch the lift off) |
@@ -31,7 +32,7 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 
 Change them in the **Keybinds** menu.
 
-**Arrow keys need a binding.** The typewriter only sends a key to the computer if that key is bound to a Redstone Link frequency on the typewriter; WASD, Space and Shift come bound; the arrow keys, Ctrl and Q don't. Sneak + right-click the typewriter to open its configuration screen and give ↑, ↓, Left Ctrl and Q any frequency (they don't need to drive anything). Check them in **T (Typewriter test)**: they should show "From: typewriter". Until the program has seen them, the Fly screen reminds you. The throttle can always be set on the Fly screen too (tap [-] / [+] or the bar).
+**Arrow keys need a binding.** The typewriter only sends a key to the computer if that key is bound to a Redstone Link frequency on the typewriter; WASD, Space and Shift come bound; the arrow keys, Ctrl and Q don't. Sneak + right-click the typewriter to open its configuration screen and give the four arrows, Left Ctrl and Q any frequency (they don't need to drive anything). Check them in **T (Typewriter test)**: they should show "From: typewriter". Until the program has seen them, the Fly screen reminds you. The throttle can always be set on the Fly screen too (tap [-] / [+] or the bar).
 
 ## Menu (on the computer)
 
@@ -45,7 +46,7 @@ Everything on screen can be **tapped**: click a key letter or its label on an ad
 | G | Gearshift setup: press 1-9 to switch each relay side on or off and watch the ship (N/P for more relays). When it turns left, press L to save whatever is on; R for turn right, B for backward. Any combination works, even a single side. Best done hovering. **X** saves the one side that's on as the **Q pulse** output: always on, off for a tick when Q is pressed (X with nothing on removes it). |
 | H | Hover calibration: holds a height 3 blocks above where it is and saves the lift level once it has been steady for 5 seconds. It also keeps fine-tuning that level while you fly. |
 | U | Tuning: change flight settings with + and -, live, each with a short explanation (see below). |
-| P | Thruster setup: pick a thruster (1-9, N/P for more pages) and switch its jobs on or off: **W** forward, **S** backward, **A** turn left, **D** turn right; or **U** lift, **V** down, **O** off. A thruster can have several movement jobs, for example turn left *and* backward, and fires at the strongest one in use. X marks them all as lift; T test-fires the picked one for a second so you can see which it is. |
+| P | Thruster setup: pick a thruster (1-9, N/P for more pages) and switch its jobs on or off: **W** forward, **S** backward, **A** turn left, **D** turn right; **J** strafe left, **L** strafe right; or **U** lift, **V** down, **O** off. A thruster can have several movement jobs, for example turn left *and* backward, and fires at the strongest one in use. X marks them all as lift; T test-fires the picked one for a second so you can see which it is. |
 | A | Go to: autopilot to coordinates (needs Smart setup). |
 | S | Smart setup: learns how the thrusters turn and push the ship. |
 | M | Manual test: switch relay sides, the thrusters and the lift by hand. |

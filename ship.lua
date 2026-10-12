@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -39,7 +39,7 @@ VERSION = "4.1.0"
 START_THROTTLE = 5      -- throttle each time Fly opens (0-15)
 FORWARD_POWER = 15      -- throttle: thruster power while forward is held (0-15);
                         -- the faster/slower keys change it while flying
-BACK_POWER = 15         -- most power the backward thrusters use (0-15); S follows the throttle
+BACK_POWER = 15         -- most power smart braking and the autopilot use backward (S always uses the throttle)
 TURN_POWER = 5          -- turning thrusters' power (0-15); also set on the Fly screen
 THRUST_RAMP = 30        -- how fast thrusters spool up and down (power per second)
 ALT_HOLD = true         -- hold height on a Sable ship (needs CC: Sable)
@@ -94,9 +94,11 @@ local ACTIONS = {
   { id = "slower",  label = "Slower" },
   { id = "boost",   label = "Boost" },
   { id = "pulse",   label = "Q pulse" },
+  { id = "sleft",   label = "Strafe left" },
+  { id = "sright",  label = "Strafe right" },
 }
 local DEFAULT_KEYS = { forward = "w", back = "s", left = "a", right = "d", up = "space", down = "leftShift",
-  faster = "up", slower = "down", boost = "leftCtrl", pulse = "q" }
+  faster = "up", slower = "down", boost = "leftCtrl", pulse = "q", sleft = "left", sright = "right" }
 
 local function clamp(v, lo, hi)
   if v < lo then return lo elseif v > hi then return hi end
@@ -107,10 +109,20 @@ local function now() return os.epoch("utc") / 1000 end
 
 -- ---------- hardware ----------
 
+-- Every peripheral once. With two modems on the same network CC lists each
+-- name twice, and a thruster listed twice would get two different powers.
+local function peripheralNames()
+  local seen, list = {}, {}
+  for _, name in ipairs(peripheral.getNames()) do
+    if not seen[name] then seen[name] = true list[#list + 1] = name end
+  end
+  return list
+end
+
 local typewriter = peripheral.find("linked_typewriter")
 local transmission = peripheral.find("redstone_transmission")
 local thrusters, relays = {}, {}   -- thrusters: { name = , p = }
-for _, name in ipairs(peripheral.getNames()) do
+for _, name in ipairs(peripheralNames()) do
   local t = peripheral.getType(name)
   if THRUSTER_TYPES[t] then thrusters[#thrusters + 1] = { name = name, p = peripheral.wrap(name) } end
   if t == "redstone_relay" then relays[#relays + 1] = name end
@@ -129,7 +141,7 @@ end)
 
 -- Velocity Sensors (Create Simulated): speed along the way they face.
 local velSensors = {}
-for _, name in ipairs(peripheral.getNames()) do
+for _, name in ipairs(peripheralNames()) do
   if peripheral.getType(name) == "velocity_sensor" then
     local p = peripheral.wrap(name)
     local ok, axis = pcall(p.getAxis)
@@ -306,11 +318,12 @@ end
 -- Each thruster is marked lift, forward or off in Thruster setup (P).
 -- Unmarked ones push forward when there's a transmission for lift.
 -- Movement thruster groups, fired by their keys while flying.
-local GROUPS = { "forward", "back", "left", "right" }
+local GROUPS = { "forward", "back", "left", "right", "sleft", "sright" }
 local ROLE_LABEL = { lift = "lift", down = "down", forward = "forward", back = "backward", left = "turn left",
+  sleft = "strafe left", sright = "strafe right",
   right = "turn right", off = "off", unset = "NOT SET" }
-local MOVE = { forward = true, back = true, left = true, right = true }
-local group = { forward = {}, back = {}, left = {}, right = {} }
+local MOVE = { forward = true, back = true, left = true, right = true, sleft = true, sright = true }
+local group = { forward = {}, back = {}, left = {}, right = {}, sleft = {}, sright = {} }
 local forwardT, liftT, moveT = group.forward, {}, {}
 local downT = {}
 
@@ -342,7 +355,7 @@ local function roleText(t)
   return table.concat(parts, "+")
 end
 local function sortThrusters()
-  group = { forward = {}, back = {}, left = {}, right = {} }
+  group = { forward = {}, back = {}, left = {}, right = {}, sleft = {}, sright = {} }
   liftT, moveT, downT = {}, {}, {}
   for _, t in ipairs(thrusters) do
     local r = roleOf(t)
@@ -372,7 +385,7 @@ local function powerCall(t, p)
 end
 
 local thrust = 0                 -- forward power right now (spooling)
-local groupPower = { forward = 0, back = 0, left = 0, right = 0 }
+local groupPower = { forward = 0, back = 0, left = 0, right = 0, sleft = 0, sright = 0 }
 local groupSent = {}
 local sentThrust = nil
 
@@ -403,7 +416,8 @@ end
 
 local function setThrusters(power)
   thrust = power
-  setGroups({ forward = power, back = groupPower.back, left = groupPower.left, right = groupPower.right })
+  setGroups({ forward = power, back = groupPower.back, left = groupPower.left, right = groupPower.right,
+    sleft = groupPower.sleft, sright = groupPower.sright })
 end
 
 local function allThrustOff()
@@ -794,7 +808,7 @@ end
 -- reports on (speed, stress).
 
 local tankNames, machineNames = {}, {}
-for _, name in ipairs(peripheral.getNames()) do
+for _, name in ipairs(peripheralNames()) do
   local types = { peripheral.getType(name) }
   local isTank, isMachine = false, false
   for _, ty in ipairs(types) do
@@ -1267,13 +1281,16 @@ local function flyScreen()
       local target = {
         -- Boost (Ctrl): full forward power, whatever the throttle says.
         forward = down("boost") and 15 or (down("forward") and FORWARD_POWER or 0),
-        -- Reverse follows the throttle (Backward power is the most it uses).
-        back = down("back") and math.min(FORWARD_POWER, BACK_POWER) or 0,
+        -- Reverse and strafing always run at the throttle.
+        back = down("back") and FORWARD_POWER or 0,
         left = turnL and TURN_POWER or 0,
         right = turnR and TURN_POWER or 0,
+        sleft = (down("sleft") and not down("sright")) and FORWARD_POWER or 0,
+        sright = (down("sright") and not down("sleft")) and FORWARD_POWER or 0,
       }
       -- Any movement key takes over from the autopilot or a landing.
       local manual = down("forward") or down("boost") or down("back") or turnL or turnR or down("up") or down("down")
+        or down("sleft") or down("sright")
       if nav and manual then navStop("manual control") course = yaw end
       if landing and manual then landing = false log("landing cancelled by hand") end
 
@@ -1382,8 +1399,14 @@ local function flyScreen()
         term.setCursorPos(1, ry + 1)
         out(" Forward   ", meter(gp("forward"), 15, 10), string.format(" %2d", gp("forward")),
           "   Back    ", meter(gp("back"), 15, 10), string.format(" %2d", gp("back")))
-        out(" Turn L    ", meter(gp("left"), 15, 10), string.format(" %2d", gp("left")),
-          "   Turn R  ", meter(gp("right"), 15, 10), string.format(" %2d", gp("right")))
+        -- Strafe meters instead of turning ones on a ship with strafe but no turn thrusters.
+        if #group.sleft + #group.sright > 0 and #group.left + #group.right == 0 then
+          out(" Strafe L  ", meter(gp("sleft"), 15, 10), string.format(" %2d", gp("sleft")),
+            "  Strafe R ", meter(gp("sright"), 15, 10), string.format(" %2d", gp("sright")))
+        else
+          out(" Turn L    ", meter(gp("left"), 15, 10), string.format(" %2d", gp("left")),
+            "   Turn R  ", meter(gp("right"), 15, 10), string.format(" %2d", gp("right")))
+        end
         print("")
         out(" Lift      ", meter(shift, 256, 11, C.head), string.format(" %3d/256  ", math.floor(shift + 0.5)),
           { C.dim, lift.status })
@@ -1482,19 +1505,20 @@ end
 local function keybinds()
   while true do
     screen("Keybinds")
+    local KB = "1234567890ab"
     for i, act in ipairs(ACTIONS) do
-      out(" ", { C.key, tostring(i % 10) }, string.format("  %-11s ", act.label), { C.head, cfg.keys[act.id] })
+      out(" ", { C.key, KB:sub(i, i):upper() }, string.format("  %-13s ", act.label), { C.head, cfg.keys[act.id] })
     end
     print("")
-    hint(" Tap an action (or press 0-9) to change its key.")
+    hint(" Tap an action to change its key.")
     footer({ { "R", "Reset to defaults", { char = "r" } }, { "Q", "Back", { char = "q" } } })
-    local ch = waitChar("1234567890rq")
+    local ch = waitChar(KB .. "rq")
     if ch == "q" then return end
     if ch == "r" then
       for id, name in pairs(DEFAULT_KEYS) do cfg.keys[id] = name end
       saveConfig()
     else
-      local act = ACTIONS[ch == "0" and 10 or tonumber(ch)]
+      local act = ACTIONS[KB:find(ch, 1, true)]
       screen("Keybinds")
       out(" Press the new key for ", { C.key, act.label })
       out(" on the ", { C.key, "typewriter" }, ".")
@@ -1866,7 +1890,8 @@ local function thrusterSetup()
   landing = false
   if #thrusters == 0 then screen("Thruster setup") print("No thrusters found.") pause() return end
   local page, sel = 0, 1
-  local KEYROLE = { w = "forward", s = "back", a = "left", d = "right", u = "lift", v = "down", o = "off" }
+  local KEYROLE = { w = "forward", s = "back", a = "left", d = "right", j = "sleft", l = "sright",
+    u = "lift", v = "down", o = "off" }
   while true do
     screen("Thruster setup")
     local first = page * 9
@@ -1885,6 +1910,7 @@ local function thrusterSetup()
     hint(" it can have several, e.g. turn left + backward.")
     out(" ", { C.key, "W" }, " forward  ", { C.key, "S" }, " backward  ", { C.key, "A" }, " turn left  ",
       { C.key, "D" }, " turn right")
+    out(" ", { C.key, "J" }, " strafe left  ", { C.key, "L" }, " strafe right")
     out(" ", { C.key, "U" }, " lift     ", { C.key, "V" }, " down      ", { C.key, "O" }, " off")
     local items = { { "T", "Test-fire", { char = "t" } }, { "X", "All lift", { char = "x" } } }
     if #thrusters > 9 then
@@ -1894,7 +1920,7 @@ local function thrusterSetup()
     end
     items[#items + 1] = { "Q", "Back", { char = "q" } }
     footer(items)
-    local ch = waitChar("123456789wsaduvotxnpq")
+    local ch = waitChar("123456789wsadjluvotxnpq")
     local n = tonumber(ch)
     local t = thrusters[sel]
     if n and thrusters[first + n] then
@@ -1933,7 +1959,7 @@ local function thrusterSetup()
       sortThrusters()
       liftSent, groupSent, thrusterSent, downSent = {}, {}, {}, {}
       downPower = 0
-      groupPower = { forward = 0, back = 0, left = 0, right = 0 }
+      groupPower = { forward = 0, back = 0, left = 0, right = 0, sleft = 0, sright = 0 }
       thrust = 0
       setShift(shift)
       return
@@ -2220,8 +2246,11 @@ local function menu()
     if unset > 0 then
       out(" Thrusters  ", { C.warn, string.format("%d without a job - tap Thrusters", unset) })
     else
-      out(" Thrusters  ", { C.head, string.format("%d lift  %d fwd  %d back  %d+%d turn", #liftT, #group.forward,
-        #group.back, #group.left, #group.right) }, #downT > 0 and { C.head, string.format("  %d down", #downT) } or "")
+      local parts = { #liftT .. " lift", #group.forward .. " fwd", #group.back .. " back" }
+      if #group.left + #group.right > 0 then parts[#parts + 1] = #group.left .. "+" .. #group.right .. " turn" end
+      if #group.sleft + #group.sright > 0 then parts[#parts + 1] = #group.sleft .. "+" .. #group.sright .. " strafe" end
+      if #downT > 0 then parts[#parts + 1] = #downT .. " down" end
+      out(" Thrusters  ", { C.head, table.concat(parts, "  "):sub(1, W - 12) })
     end
     out(" Hover      ", cfg.hover and string.format("%d/256", cfg.hover) or { C.warn, "not calibrated - tap Hover" },
       transmission and { C.dim, "   (lift transmission)" } or "")
@@ -2556,7 +2585,7 @@ if fs.exists(LOG_FILE) then
 end
 logFile = fs.open(LOG_FILE, "w")
 log("Ship Pilot v%s", VERSION)
-for _, name in ipairs(peripheral.getNames()) do log("peripheral %s: %s", name, tostring(peripheral.getType(name))) end
+for _, name in ipairs(peripheralNames()) do log("peripheral %s: %s", name, tostring(peripheral.getType(name))) end
 for _, v in ipairs(velSensors) do log("velocity sensor %s axis %s", v.name, tostring(v.axis)) end
 for _, t in ipairs(thrusters) do log("thruster %s role %s", t.name, roleText(t)) end
 for _, n in ipairs(tankNames) do log("fuel tank %s", n) end
