@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.2.0"
+VERSION = "4.3.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -39,6 +39,7 @@ VERSION = "4.2.0"
 START_THROTTLE = 5      -- throttle each time Fly opens (0-15)
 FORWARD_POWER = 15      -- throttle: thruster power while forward is held (0-15);
                         -- the faster/slower keys change it while flying
+BACK_MOMENTUM = 1.5     -- S: extra back power per block/s still moving forward (never below the throttle)
 BACK_POWER = 15         -- most power smart braking and the autopilot use backward (S always uses the throttle)
 TURN_POWER = 5          -- turning thrusters' power (0-15); also set on the Fly screen
 THRUST_RAMP = 30        -- how fast thrusters spool up and down (power per second)
@@ -603,9 +604,23 @@ local function liftStep(dt)
     local want = ud * CLIMB_SPEED
     if ud ~= 0 then
       lift.holdAlt = nil
+      lift.stopping = true
     else
-      lift.holdAlt = lift.holdAlt or alt
-      want = clamp(0.5 * (lift.holdAlt - alt), -CLIMB_SPEED, CLIMB_SPEED)
+      -- Let go of up/down: first stop climbing or sinking, and only then
+      -- take the height it stopped at as the new hover height (no
+      -- springing back to where the key was let go).
+      if lift.stopping and not lift.holdAlt then
+        want = 0
+        if math.abs(vy) < 0.3 then
+          lift.stopping = false
+          lift.holdAlt = alt
+          log("lift: new hover height %.1f", alt)
+        end
+      else
+        lift.stopping = false
+        lift.holdAlt = lift.holdAlt or alt
+        want = clamp(0.5 * (lift.holdAlt - alt), -CLIMB_SPEED, CLIMB_SPEED)
+      end
     end
     -- Holding down while not moving: it's on the ground, so land.
     if ud < 0 and math.abs(vy) < 0.1 then
@@ -738,7 +753,7 @@ local function navLoop()
           lift.mode = "fly"
           lift.hover = math.max(shift, cfg.hover or 0)
         end
-        if lift.updown == 0 then lift.holdAlt = nav.y or lift.holdAlt or alt end
+        if lift.updown == 0 then lift.holdAlt = nav.y or lift.holdAlt or alt lift.stopping = false end
 
         local dx, dz = nav.x - posX, nav.z - posZ
         local dist = math.sqrt(dx * dx + dz * dz)
@@ -1213,6 +1228,7 @@ local function flyScreen()
   local course = yaw          -- smart mode: the heading to hold (the "lock")
   local lastTurnKey = 0
   local brakeI = 0            -- smart braking: integral term
+  local backDir = nil         -- S: which way the ship was going when it was pressed
   local braking = false
   local frame = 0
   local function stepThrottle(dir)
@@ -1282,12 +1298,31 @@ local function flyScreen()
         -- Boost (Ctrl): full forward power, whatever the throttle says.
         forward = down("boost") and 15 or (down("forward") and FORWARD_POWER or 0),
         -- Reverse and strafing always run at the throttle.
-        back = down("back") and FORWARD_POWER or 0,
+        back = 0,
         left = turnL and TURN_POWER or 0,
         right = turnR and TURN_POWER or 0,
         sleft = (down("sleft") and not down("sright")) and FORWARD_POWER or 0,
         sright = (down("sright") and not down("sleft")) and FORWARD_POWER or 0,
       }
+      -- S: the throttle, plus more while the ship still carries forward
+      -- momentum (never less than the throttle). "Forward" is the nose
+      -- after Smart setup, otherwise the way it was moving when S went down.
+      if down("back") then
+        if not backDir then
+          local sp = math.sqrt(vx * vx + vz * vz)
+          backDir = sp > 0.3 and { x = vx / sp, z = vz / sp } or { x = 0, z = 0 }
+        end
+        local along
+        if smartReady() then
+          local ny = noseYaw()
+          along = vx * math.cos(ny) + vz * math.sin(ny)
+        else
+          along = vx * backDir.x + vz * backDir.z
+        end
+        target.back = clamp(FORWARD_POWER + BACK_MOMENTUM * math.max(0, along), FORWARD_POWER, 15)
+      else
+        backDir = nil
+      end
       -- Any movement key takes over from the autopilot or a landing.
       local manual = down("forward") or down("boost") or down("back") or turnL or turnR or down("up") or down("down")
         or down("sleft") or down("sright")
@@ -1691,6 +1726,7 @@ local function hoverCalibration()
     end
     local target = (lift.holdAlt or alt) + 3
     lift.holdAlt = target
+    lift.stopping = false
     local steady, last, started = 0, now(), now()
     while true do
       local t = now()
