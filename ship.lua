@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.3.0"
+VERSION = "4.3.1"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -165,7 +165,7 @@ local function velText()
 end
 
 -- ---------- log ----------
-local LOG_FILE, LOG_LIMIT = "ship.log", 400000
+local LOG_FILE, LOG_LIMIT = "ship.log", 120000   -- x2 with .old; the disk is only 1 MB
 local logFile, logBytes, logFull = nil, 0, false
 local logStart = now()
 local function log(fmt, ...)
