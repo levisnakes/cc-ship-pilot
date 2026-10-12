@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.4.0"
+VERSION = "4.4.1"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -1242,7 +1242,7 @@ local function screen(title)
   term.clear()
   term.setCursorPos(1, 1)
   local badge, bcol = liftBadge()
-  local left = COLOR and (" Ship Pilot  \16 " .. title) or (" Ship Pilot > " .. title)
+  local left = COLOR and (" Ship Pilot v" .. VERSION .. "  \16 " .. title) or (" Ship Pilot v" .. VERSION .. " > " .. title)
   local right = COLOR and (" " .. badge .. " ") or ("[" .. badge .. "]")
   bg(C.bar)
   write(left .. string.rep(" ", math.max(1, W - #left - #right)))
@@ -1553,8 +1553,8 @@ local function flyScreen()
         if down("boost") then msgs[#msgs + 1] = { { C.key, " BOOST" }, { C.dim, "  full power while Ctrl is held" } } end
         if landing then msgs[#msgs + 1] = { { C.warn, " Landing" }, { C.dim, "  (any movement key takes over)" } } end
         if nav then
-          msgs[#msgs + 1] = { { C.good, nav.mode == "brake" and " Stop & hold " or " Autopilot " }, nav.status or "",
-            { C.dim, "  (any key takes over)" } }
+          msgs[#msgs + 1] = { { C.good, nav.mode == "brake" and " Stop & hold: " or " Autopilot " }, nav.status or "",
+            { C.dim, nav.mode == "brake" and "" or "  (any key takes over)" } }
         elseif cfg.smartOn then
           if not smartReady() then
             msgs[#msgs + 1] = { { C.warn, " Smart mode needs Smart setup (menu S)" } }
@@ -1571,8 +1571,8 @@ local function flyScreen()
           msgs[#msgs + 1] = { { C.warn, " Q pulse: no relay side set (Gearshifts, X)" } }
         end
         if not throttleSeen then
-          msgs[#msgs + 1] = { { C.dim, " Arrows/Ctrl: bind them to a link frequency on" } }
-          msgs[#msgs + 1] = { { C.dim, " the typewriter (sneak + right-click it)." } }
+          msgs[#msgs + 1] = { { C.dim, " Arrows, Ctrl, B, Q: bind them to a link frequency" } }
+          msgs[#msgs + 1] = { { C.dim, " on the typewriter (sneak + right-click it)." } }
         end
         for i = 1, math.min(#msgs, 6) do out(table.unpack(msgs[i])) end
         local items = { { "Q", "Menu", { char = "q" } }, { "-", "", { char = "-" } }, { "+", "", { char = "+" } },
