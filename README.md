@@ -28,6 +28,7 @@ Right-click the typewriter to start using it, then pick **F (Fly)** on the compu
 | ↑ / ↓ arrows | throttle: forward power 0-15, one step per tap. It starts at 5 every time you open Fly (Start throttle in Tuning). W fires at this power. You can also set it on the Fly screen: tap **[-]** / **[+]**, tap a cell of the throttle bar to jump to that level, or press - / + on the computer. |
 | Left Ctrl | **boost** (hold): full forward power (15) while held, whatever the throttle; spools up twice as fast. With a speaker connected you hear a launch whoosh, an engine rumble while it's held, and a power-down note when you let go. |
 | Q | **Q pulse**: the Q pulse relay side (always on) drops for a moment (4 game ticks; change it with + / - in Gearshifts, T there sends a test pulse). Up and down are locked during the pulse and for 1 second after it (PULSE_LOCK); the ship holds its height meanwhile. Works from any screen except Keybinds and Typewriter test, once per press. Set the side in **G (Gearshifts)** with X. |
+| B | **Stop & hold**: stops every movement where it is (forward/back, strafe, up/down, and turning if it has turn thrusters), then holds that exact spot, even against a push. B again, or any movement key, gives control back. Needs **S (Smart setup)** run once; it uses the ship's own position from CC: Sable, no GPS. Bind B on the typewriter like the arrows. |
 | Fly screen: Turning row | turning thrusters' power (default 5): tap [-] / [+] or the bar, or press [ / ] on the computer. Saved between flights. |
 
 Change them in the **Keybinds** menu.
@@ -55,7 +56,7 @@ Everything set up from the menus is saved in `ship.cfg`.
 
 ## Smart mode, autopilot and website
 
-Run **S (Smart setup)** once, hovering with some room around: the ship turns a little each way and moves forward and back a few blocks to learn how its thrusters turn and push it.
+Run **S (Smart setup)** once, hovering with some room around: the ship turns a little each way (if it has turn thrusters) and gets a short push from each thruster group (forward, back, strafe) to learn which way each one pushes it. Ships without turn thrusters can run it too; they get Stop & hold (B) but not smart mode or the autopilot.
 
 - **Smart mode** (press **M** on the Fly screen, or the button there): the computer locks your heading and holds it with the turning thrusters. A/D turn the lock itself at a steady **SMART_TURN_RATE** (about 26°/s) and the ship follows, so it turns smoothly and stops exactly where you let go.
 - **Smart braking** (part of smart mode): let go of W (and don't hold S) and a PI controller fires the backward thrusters to bring the ship to a smooth stop (or the forward thrusters if it's drifting backward). Hold W or S to take over.

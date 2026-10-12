@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.3.1"
+VERSION = "4.4.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -56,6 +56,9 @@ MANUAL_LIFT_STEP = 40
 
 -- Smart mode and autopilot (need CC: Sable; run Smart setup once first).
 NAV_SPEED = 10          -- autopilot top speed (blocks per second)
+HOLD_KP = 0.3           -- B (hold in place): push back per block off the spot
+HOLD_KD = 1.2           -- B: push against each block/s of drift
+HOLD_KI = 0.08          -- B: slowly builds up a push against steady drift (wind, a tilted thruster)
 
 -- Fuel (lava in the fluid tanks and the thrusters).
 LOW_FUEL_SECONDS = 30   -- warn when this much flying time is left
@@ -97,9 +100,10 @@ local ACTIONS = {
   { id = "pulse",   label = "Q pulse" },
   { id = "sleft",   label = "Strafe left" },
   { id = "sright",  label = "Strafe right" },
+  { id = "brake",   label = "Stop & hold" },
 }
 local DEFAULT_KEYS = { forward = "w", back = "s", left = "a", right = "d", up = "space", down = "leftShift",
-  faster = "up", slower = "down", boost = "leftCtrl", pulse = "q", sleft = "left", sright = "right" }
+  faster = "up", slower = "down", boost = "leftCtrl", pulse = "q", sleft = "left", sright = "right", brake = "b" }
 
 local function clamp(v, lo, hi)
   if v < lo then return lo elseif v > hi then return hi end
@@ -722,14 +726,54 @@ end
 
 local function noseYaw() return yaw + ((cfg.smart and cfg.smart.offset) or 0) end
 
+-- Push directions (from Smart setup): for each thruster group, the
+-- acceleration it gives at full power, in the ship's own frame (x along
+-- the ship's +X axis, z across it), so it works for any layout.
+local HOLD = {}   -- push directions and stop & hold (kept in one table: Lua allows 200 locals)
+HOLD.GROUPS = { "forward", "back", "sleft", "sright" }
+function HOLD.toBody(ax, az, y)
+  local c, s = math.cos(-y), math.sin(-y)
+  return ax * c - az * s, ax * s + az * c
+end
+function HOLD.ready()
+  if not cfg.push or not yaw then return false end
+  for _, g in ipairs(HOLD.GROUPS) do if cfg.push[g] and #group[g] > 0 then return true end end
+  return false
+end
+-- Thruster powers that give (about) a wanted world acceleration.
+function HOLD.pushFor(ax, az)
+  local want = {}
+  if not cfg.push or not yaw then return want end
+  local bx, bz = HOLD.toBody(ax, az, yaw)
+  for _, g in ipairs(HOLD.GROUPS) do
+    local p = cfg.push[g]
+    if p and #group[g] > 0 then
+      local mag = math.sqrt(p.x * p.x + p.z * p.z)
+      if mag > 0.02 then
+        local along = (bx * p.x + bz * p.z) / mag   -- wanted accel along this group's push
+        want[g] = clamp(along / mag, 0, 1) * 15
+      end
+    end
+  end
+  return want
+end
+
 -- The autopilot: { mode = "goto" or "hold", x, y, z, status }
 local nav = nil
 local landing = false   -- website "land": sink until the lift switches off
 local remoteId, remoteState, remoteSent = nil, "off", 0   -- website link
 local function navStop(why)
-  if nav then log("autopilot off: %s", why or "") end
+  if nav then log("%s off: %s", nav.mode == "brake" and "stop & hold" or "autopilot", why or "") end
   nav = nil
   allThrustOff()
+end
+
+-- B: stop every movement where it is, then hold that spot.
+function HOLD.toggle()
+  if nav and nav.mode == "brake" then navStop("B again") return end
+  nav = { mode = "brake", phase = "stop", status = "stopping" }
+  if lift.mode == "fly" then lift.holdAlt, lift.stopping = nil, true end
+  log("stop & hold: on")
 end
 
 local function navLoop()
@@ -744,7 +788,45 @@ local function navLoop()
         lift.updown = -1
       end
     end
-    if nav and posX then
+    if nav and nav.mode == "brake" and posX then
+      -- First kill the drift, then hold the spot where it stopped. The
+      -- lift does the same up and down; turning holds the heading.
+      local speed = math.sqrt(vx * vx + vz * vz)
+      local ax, az
+      if nav.phase == "stop" then
+        ax, az = -HOLD_KD * vx, -HOLD_KD * vz
+        if speed < 0.3 and math.abs(yawRate) < 0.05 then
+          stoppedSince = stoppedSince or now()
+          if now() - stoppedSince > 0.5 then
+            nav.phase, nav.x, nav.z, nav.heading = "hold", posX, posZ, yaw
+            nav.ix, nav.iz = 0, 0
+            log("stop & hold: stopped, holding %.1f %.1f", posX, posZ)
+          end
+        else
+          stoppedSince = nil
+        end
+      else
+        local ex, ez = nav.x - posX, nav.z - posZ
+        nav.ix = clamp(nav.ix + ex * 0.1, -8, 8)
+        nav.iz = clamp(nav.iz + ez * 0.1, -8, 8)
+        ax = HOLD_KP * ex + HOLD_KI * nav.ix - HOLD_KD * vx
+        az = HOLD_KP * ez + HOLD_KI * nav.iz - HOLD_KD * vz
+      end
+      -- Tiny pushes only make it twitch.
+      if math.sqrt(ax * ax + az * az) < 0.05 then ax, az = 0, 0 end
+      local want = HOLD.pushFor(ax, az)
+      if smartReady() then want.left, want.right = steerYaw(nav.heading) end
+      setGroups(want)
+      thrust = want.forward or 0
+      if not HOLD.ready() then
+        nav.status = "run Smart setup (S) first"
+      elseif nav.phase == "stop" then
+        nav.status = string.format("stopping, %.1f b/s", speed)
+      else
+        local dx, dz = nav.x - posX, nav.z - posZ
+        nav.status = string.format("holding (%.1f off)", math.sqrt(dx * dx + dz * dz))
+      end
+    elseif nav and posX then
       if not navReady() then
         nav.status = "needs Smart setup first"
       else
@@ -1251,6 +1333,8 @@ local function flyScreen()
         cfg.tune.TURN_POWER = TURN_POWER
         saveConfig()
         log("turning power -> %d", TURN_POWER)
+      elseif c == "b" then
+        HOLD.toggle()
       elseif c == "x" then
         muteAlarm()
       elseif c == "m" then
@@ -1267,6 +1351,9 @@ local function flyScreen()
     elseif ev == "throttle_set" and type(a) == "number" then
       FORWARD_POWER = clamp(a, 0, 15)
       log("throttle -> %d (tapped)", FORWARD_POWER)
+    elseif ev == "key" and a == keys[cfg.keys.brake] and not latched[a] and fromTypewriter(a) then
+      latched[a] = now()
+      HOLD.toggle()
     elseif ev == "key" then
       local dir = (a == keys[cfg.keys.faster] and 1) or (a == keys[cfg.keys.slower] and -1) or 0
       if dir ~= 0 and not latched[a] then
@@ -1466,7 +1553,8 @@ local function flyScreen()
         if down("boost") then msgs[#msgs + 1] = { { C.key, " BOOST" }, { C.dim, "  full power while Ctrl is held" } } end
         if landing then msgs[#msgs + 1] = { { C.warn, " Landing" }, { C.dim, "  (any movement key takes over)" } } end
         if nav then
-          msgs[#msgs + 1] = { { C.good, " Autopilot " }, nav.status or "", { C.dim, "  (any key takes over)" } }
+          msgs[#msgs + 1] = { { C.good, nav.mode == "brake" and " Stop & hold " or " Autopilot " }, nav.status or "",
+            { C.dim, "  (any key takes over)" } }
         elseif cfg.smartOn then
           if not smartReady() then
             msgs[#msgs + 1] = { { C.warn, " Smart mode needs Smart setup (menu S)" } }
@@ -1488,7 +1576,8 @@ local function flyScreen()
         end
         for i = 1, math.min(#msgs, 6) do out(table.unpack(msgs[i])) end
         local items = { { "Q", "Menu", { char = "q" } }, { "-", "", { char = "-" } }, { "+", "", { char = "+" } },
-          { "M", cfg.smartOn and "Smart ON" or "Smart off", { char = "m" } } }
+          { "M", cfg.smartOn and "Smart ON" or "Smart off", { char = "m" } },
+          { "B", nav and nav.mode == "brake" and "HOLDING" or "Hold", { char = "b" } } }
         if fuelAlarm and not alarmMuted then items[#items + 1] = { "X", "Mute alarm", { char = "x" } } end
         footer(items)
       end
@@ -1540,7 +1629,7 @@ end
 local function keybinds()
   while true do
     screen("Keybinds")
-    local KB = "1234567890ab"
+    local KB = "1234567890abc"
     for i, act in ipairs(ACTIONS) do
       out(" ", { C.key, KB:sub(i, i):upper() }, string.format("  %-13s ", act.label), { C.head, cfg.keys[act.id] })
     end
@@ -2013,14 +2102,18 @@ local function smartSetup()
     pause()
     return
   end
-  if #group.left == 0 or #group.right == 0 or #group.forward == 0 then
-    out({ C.warn, " Needs turn left, turn right and forward thrusters" })
+  local pushGroups = {}
+  for _, g in ipairs(HOLD.GROUPS) do if #group[g] > 0 then pushGroups[#pushGroups + 1] = g end end
+  local turning = #group.left > 0 and #group.right > 0
+  if #pushGroups == 0 then
+    out({ C.warn, " Needs forward, backward or strafe thrusters" })
     out({ C.warn, " (Thruster setup)." })
     pause()
     return
   end
-  hint(" The ship turns a little left and right, then")
-  hint(" moves forward and back a few blocks, and stops.")
+  hint(turning and " The ship turns a little left and right, then" or " The ship gets a short push from each group of")
+  hint(turning and " gets a short push from each thruster group," or " thrusters (forward, back, strafe) and stops")
+  hint(turning and " stopping in between." or " in between.")
   hint(" Do this hovering, with some room around it.")
   footer({ { "Enter", "Start", { key = keys.enter } }, { "Q", "Cancel", { char = "q" } } })
   while true do
@@ -2028,6 +2121,7 @@ local function smartSetup()
     if ev == "char" and a:lower() == "q" then return end
     if ev == "key" and a == keys.enter then break end
   end
+  if nav then navStop("smart setup") end
   -- Keep hovering through all of it.
   if lift.mode ~= "fly" and liftAvailable() then
     lift.mode, lift.hover = "fly", math.max(shift, cfg.hover or 0)
@@ -2052,18 +2146,13 @@ local function smartSetup()
     sleep(0.4)
     return (yawRate - r0) / held, (vx - v0x) / held, (vz - v0z) / held, y0
   end
+  -- Brake with whatever has been learned so far.
   local function settle(step, seconds)
     local t0 = now()
     while now() - t0 < seconds do
-      local l, r = steerYaw(nil)
-      local fwd, back = 0, 0
-      if cfg.smart.fwd then
-        local ny = noseYaw()
-        local along = vx * math.cos(ny) + vz * math.sin(ny)
-        if along > 0.2 then back = clamp(along / math.max(0.2, cfg.smart.back or 0.5), 0, 1) * BACK_POWER
-        elseif along < -0.2 then fwd = clamp(-along / cfg.smart.fwd, 0, 1) * 15 end
-      end
-      setGroups({ left = l, right = r, forward = fwd, back = back })
+      local want = HOLD.pushFor(-HOLD_KD * vx, -HOLD_KD * vz)
+      if smartReady() then want.left, want.right = steerYaw(nil) end
+      setGroups(want)
       if math.abs(yawRate) < 0.03 and math.sqrt(vx * vx + vz * vz) < 0.3 and now() - t0 > 1 then break end
       sleep(0.1)
       show(step)
@@ -2071,46 +2160,63 @@ local function smartSetup()
     setGroups({})
   end
 
-  local L = pulse("Turning left...", { left = 15 }, 0.6)
-  local R = pulse("Turning right...", { right = 15 }, 0.6)
-  log("smart setup: left %.3f right %.3f rad/s^2", L, R)
-  if math.abs(L) < 0.02 or math.abs(R) < 0.02 or L * R > 0 then
-    screen("Smart setup")
-    out({ C.bad, " The turning thrusters didn't turn the ship" })
-    out({ C.bad, " opposite ways." })
-    hint(string.format(" Measured: left %.2f, right %.2f", L, R))
-    hint(" Check Thruster setup, then try again.")
-    pause()
-    return
+  local newSmart = {}
+  local L, R = nil, nil
+  if turning then
+    L = pulse("Turning left...", { left = 15 }, 0.6)
+    R = pulse("Turning right...", { right = 15 }, 0.6)
+    log("smart setup: left %.3f right %.3f rad/s^2", L, R)
+    if math.abs(L) < 0.02 or math.abs(R) < 0.02 or L * R > 0 then
+      screen("Smart setup")
+      out({ C.bad, " The turning thrusters didn't turn the ship" })
+      out({ C.bad, " opposite ways." })
+      hint(string.format(" Measured: left %.2f, right %.2f", L, R))
+      hint(" Check Thruster setup, then try again.")
+      pause()
+      return
+    end
+    newSmart.left, newSmart.right = L, R
+    cfg.smart = { left = L, right = R, offset = cfg.smart and cfg.smart.offset }
+    settle("Stopping the turn...", 6)
   end
-  cfg.smart = { left = L, right = R }
-  settle("Stopping the turn...", 6)
-  local _, ax, az, y0 = pulse("Forward...", { forward = 15 }, 1.0)
-  local fwdAcc = math.sqrt(ax * ax + az * az)
-  local offset = wrapAngle(atan2(az, ax) - y0)
-  cfg.smart.offset = offset
-  local _, bx, bz = pulse("Backward...", { back = 15 }, 1.0)
-  local backAcc = -(bx * math.cos(y0 + offset) + bz * math.sin(y0 + offset))
-  log("smart setup: forward %.2f back %.2f b/s^2, nose offset %.0f deg", fwdAcc, backAcc, math.deg(offset))
-  if fwdAcc < 0.05 then
-    screen("Smart setup")
-    out({ C.bad, " The forward thrusters didn't move the ship." })
-    pause()
-    return
+
+  local LABEL = { forward = "Forward", back = "Backward", sleft = "Strafe left", sright = "Strafe right" }
+  cfg.push = {}
+  local results = {}
+  for _, g in ipairs(pushGroups) do
+    local _, ax, az, y0 = pulse(LABEL[g] .. "...", { [g] = 15 }, 1.0)
+    local bx, bz = HOLD.toBody(ax, az, y0)
+    local mag = math.sqrt(bx * bx + bz * bz)
+    log("smart setup: %s pushes %.2f b/s^2 (body %.2f, %.2f)", g, mag, bx, bz)
+    if mag >= 0.05 then cfg.push[g] = { x = bx, z = bz } end
+    results[#results + 1] = { g = g, mag = mag }
+    settle("Stopping...", 6)
   end
-  cfg.smart.fwd = fwdAcc
-  cfg.smart.back = backAcc > 0.05 and backAcc or nil
-  settle("Stopping...", 8)
+  -- The nose is where the forward thrusters push (smart mode, autopilot).
+  local f = cfg.push.forward
+  if f then
+    newSmart.offset = atan2(f.z, f.x)
+    newSmart.fwd = math.sqrt(f.x * f.x + f.z * f.z)
+    local b = cfg.push.back
+    if b then
+      local backAcc = -(b.x * math.cos(newSmart.offset) + b.z * math.sin(newSmart.offset))
+      newSmart.back = backAcc > 0.05 and backAcc or nil
+    end
+  end
+  cfg.smart = newSmart
   saveConfig()
   screen("Smart setup")
   out(" ", { C.good, "Done!" })
   print("")
-  out(" Turning    ", string.format("left %.2f  right %.2f rad/s2", L, R))
-  out(" Forward    ", string.format("%.2f b/s2", fwdAcc))
-  out(" Backward   ", cfg.smart.back and string.format("%.2f b/s2", cfg.smart.back) or { C.warn, "none - it can't brake" })
+  if L then out(" Turning      ", string.format("left %.2f  right %.2f rad/s2", L, R)) end
+  for _, r in ipairs(results) do
+    out(string.format(" %-13s", LABEL[r.g]), r.mag >= 0.05 and string.format("%.2f b/s2", r.mag)
+      or { C.warn, "didn't move the ship" })
+  end
   print("")
-  hint(" Smart mode (M on the Fly screen) and the")
-  hint(" autopilot (Go to) can be used now.")
+  hint(" B on the Fly screen (or the typewriter) stops")
+  hint(" the ship and holds it in place.")
+  if smartReady() and newSmart.fwd then hint(" Smart mode and Go to can be used too.") end
   pause()
 end
 
