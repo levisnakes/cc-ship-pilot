@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.4.1"
+VERSION = "4.5.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -169,19 +169,42 @@ local function velText()
 end
 
 -- ---------- log ----------
-local LOG_FILE, LOG_LIMIT = "ship.log", 120000   -- x2 with .old; the disk is only 1 MB
-local logFile, logBytes, logFull = nil, 0, false
+-- The log rotates: at LOG_LIMIT it becomes ship.log.old and a new one
+-- starts, so the two together stay under 2 x LOG_LIMIT. Logging can never
+-- stop the program: if the disk is low or a write fails, it just stops.
+local LOG_FILE, LOG_LIMIT, LOG_MIN_FREE = "ship.log", 60000, 150000
+local logFile, logBytes = nil, 0
 local logStart = now()
 local function log(fmt, ...)
-  if not logFile or logFull then return end
-  local line = string.format("%8.2f ", now() - logStart) .. string.format(fmt, ...)
-  logBytes = logBytes + #line + 1
-  if logBytes > LOG_LIMIT then
-    logFull = true
-    line = "log full, stopped writing"
+  if not logFile then return end
+  local fok, text = pcall(string.format, fmt, ...)
+  if not fok then text = tostring(fmt) end
+  local ok = pcall(function()
+    local line = string.format("%8.2f ", now() - logStart) .. text
+    if logBytes + #line + 1 > LOG_LIMIT then
+      logFile.close()
+      if fs.exists(LOG_FILE .. ".old") then fs.delete(LOG_FILE .. ".old") end
+      fs.move(LOG_FILE, LOG_FILE .. ".old")
+      logFile = fs.open(LOG_FILE, "w")
+      logBytes = 0
+    end
+    if fs.getFreeSpace("/") < LOG_MIN_FREE then
+      if fs.exists(LOG_FILE .. ".old") then fs.delete(LOG_FILE .. ".old") end
+      if fs.getFreeSpace("/") < LOG_MIN_FREE then
+        logFile.writeLine("disk nearly full - logging stopped")
+        logFile.close()
+        logFile = nil
+        return
+      end
+    end
+    logFile.writeLine(line)
+    logFile.flush()
+    logBytes = logBytes + #line + 1
+  end)
+  if not ok then
+    pcall(function() logFile.close() end)
+    logFile = nil
   end
-  logFile.writeLine(line)
-  logFile.flush()
 end
 
 -- ---------- saved setup ----------
@@ -206,9 +229,13 @@ local function defaultConfig()
 end
 
 local function saveConfig()
-  local h = fs.open(CONFIG_FILE, "w")
-  h.write(textutils.serialize(cfg))
-  h.close()
+  -- Never crash over a full disk: keep flying, try again next save.
+  local ok, err = pcall(function()
+    local h = fs.open(CONFIG_FILE, "w")
+    h.write(textutils.serialize(cfg))
+    h.close()
+  end)
+  if not ok then log("saving ship.cfg FAILED: %s", tostring(err)) end
 end
 
 local function loadConfig()
@@ -273,8 +300,11 @@ end
 local function isPulse(o)
   return cfg.pulse ~= nil and o.relay == cfg.pulse.relay and o.side == cfg.pulse.side
 end
+-- Resting state: "drop" pulses sit on and drop for a moment; "blip"
+-- pulses sit off and come on for a moment (for a toggle latch: a reboot
+-- or reset then can't flip it).
 local function pulseOn()
-  if cfg.pulse then setOutput(cfg.pulse, true) end
+  if cfg.pulse then setOutput(cfg.pulse, not cfg.pulseBlip) end
 end
 
 local function allRelaysOff()
@@ -292,13 +322,14 @@ local function pulse()
   if not cfg.pulse or pulsing then return end
   pulsing = true
   upDownLockUntil = math.huge   -- no up/down during the pulse...
+  local rest = not cfg.pulseBlip
   outState[cfg.pulse.relay .. ":" .. cfg.pulse.side] = nil
-  setOutput(cfg.pulse, false)
+  setOutput(cfg.pulse, not rest)
   sleep(0.05 * math.max(1, cfg.pulseTicks or PULSE_TICKS))
-  setOutput(cfg.pulse, true)
+  setOutput(cfg.pulse, rest)
   pulsing, lastPulse = false, now()
   upDownLockUntil = now() + PULSE_LOCK   -- ...or for PULSE_LOCK seconds after it
-  log("Q pulse sent (%d ticks)", cfg.pulseTicks or PULSE_TICKS)
+  log("Q pulse sent (%s, %d ticks)", cfg.pulseBlip and "blip" or "drop", cfg.pulseTicks or PULSE_TICKS)
 end
 
 local currentMove = nil
@@ -1728,9 +1759,10 @@ local function gearshiftSetup()
       items[#items + 1] = { "", string.format("%d/%d", page + 1, pages) }
       items[#items + 1] = { "N", "", { char = "n" } }
     end
+    items[#items + 1] = { "O", cfg.pulseBlip and "Pulse: blip on" or "Pulse: drop", { char = "o" } }
     items[#items + 1] = { "Q", "Done", { char = "q" } }
     footer(items)
-    local ch = waitChar("123456789lrbxcnpq+=-t")
+    local ch = waitChar("123456789lrbxcnpq+=-to")
     local n = tonumber(ch)
     if n and list[first + n] then
       local i = first + n
@@ -1770,6 +1802,13 @@ local function gearshiftSetup()
       cfg.pulseTicks = clamp((cfg.pulseTicks or PULSE_TICKS) + (ch == "-" and -1 or 1), 1, 40)
       saveConfig()
       log("gearshift setup: Q pulse length %d ticks", cfg.pulseTicks)
+    elseif ch == "o" then
+      cfg.pulseBlip = not cfg.pulseBlip
+      saveConfig()
+      pulseOn()
+      readOn()
+      note = cfg.pulseBlip and "Q pulse: off, blips on (for a toggle latch)." or "Q pulse: on, drops off."
+      log("gearshift setup: Q pulse type %s", cfg.pulseBlip and "blip" or "drop")
     elseif ch == "t" then
       if not cfg.pulse then
         note = "Set the Q pulse side first: one side on, then X."
@@ -2711,7 +2750,7 @@ local function sampleLoop()
       alt and string.format("%.2f", alt) or "-", vy, velText(),
       posX and string.format("%.1f,%.1f", posX, posZ) or "-", yaw and string.format("%.0f", math.deg(yaw)) or "-",
       yawRate, vx, vz, nav and (nav.mode .. " " .. tostring(nav.status)) or "-")
-    sleep(currentScreen == "Fly" and 0.2 or 1)
+    sleep(currentScreen == "Fly" and 0.5 or 2)
   end
 end
 
@@ -2721,11 +2760,13 @@ local function ui()
 end
 
 -- Start the log (keeping the previous run as ship.log.old).
-if fs.exists(LOG_FILE) then
-  if fs.exists(LOG_FILE .. ".old") then fs.delete(LOG_FILE .. ".old") end
-  fs.move(LOG_FILE, LOG_FILE .. ".old")
-end
-logFile = fs.open(LOG_FILE, "w")
+pcall(function()
+  if fs.exists(LOG_FILE) then
+    if fs.exists(LOG_FILE .. ".old") then fs.delete(LOG_FILE .. ".old") end
+    fs.move(LOG_FILE, LOG_FILE .. ".old")
+  end
+  logFile = fs.open(LOG_FILE, "w")
+end)
 log("Ship Pilot v%s", VERSION)
 for _, name in ipairs(peripheralNames()) do log("peripheral %s: %s", name, tostring(peripheral.getType(name))) end
 for _, v in ipairs(velSensors) do log("velocity sensor %s axis %s", v.name, tostring(v.axis)) end
