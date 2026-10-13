@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.5.0"
+VERSION = "4.5.1"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -274,6 +274,12 @@ local function loadConfig()
   if not cfg.climb39 then
     cfg.climb39 = true
     if cfg.tune.CLIMB_SPEED == nil or cfg.tune.CLIMB_SPEED == 4 then cfg.tune.CLIMB_SPEED = 8 end
+  end
+  -- v4.5.1: the Q pulse drives a toggle latch, which only wants a short
+  -- on-pulse; make that the default once (O in Gearshifts switches back).
+  if not cfg.blip451 then
+    cfg.blip451 = true
+    cfg.pulseBlip = true
   end
   for name, v in pairs(cfg.tune) do _ENV[name] = v end
 end
