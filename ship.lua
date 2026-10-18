@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.9.0"
+VERSION = "4.10.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -75,6 +75,13 @@ SMART_TURN_RATE = 0.45  -- smart mode: how fast A/D turn the ship (radians per s
 REMOTE = true
 TELEMETRY_SECONDS = 5     -- status update interval while moving
 REMOTE_DAILY_LIMIT = 150  -- stop sending updates after this many a day
+
+-- Balance (needs Smart setup): thrusters in one group that sit off the
+-- center of mass turn the ship. The ones that turn it more get less power,
+-- so strafing, forward and reverse go straight.
+BALANCE = true
+BALANCE_DAMP = 1.5      -- extra correction per rad/s the ship still turns
+BALANCE_LEARN = 0.6     -- how fast it takes out a turn that keeps going
 
 -- ===================== END OF SETTINGS =======================
 
@@ -453,6 +460,48 @@ local sentThrust = nil
 
 local thrusterSent = {}
 
+-- Balance: cfg.torque[name] = how fast that thruster alone turns the ship
+-- (rad/s^2 at full power, from Smart setup). In a group with thrusters
+-- turning both ways, the stronger side is turned down until they cancel,
+-- plus a little feedback on the turn rate for what the measurement missed.
+-- Off while the turning thrusters are firing (you're turning on purpose).
+-- One table: the main chunk is near Lua's 200-locals limit.
+local BAL = { GROUPS = { "forward", "back", "sleft", "sright" }, i = {}, u = {} }
+function BAL.factors(sent)
+  local u = {}
+  BAL.u = u
+  local tq = cfg.torque
+  if BAL.off or not BALANCE or not tq or not BAL.rate then return end
+  local rate = BAL.rate()
+  local t = now()
+  local dt = BAL.lastT and math.min(t - BAL.lastT, 0.5) or 0
+  BAL.lastT = t
+  local turning = (sent.left or 0) > 0 or (sent.right or 0) > 0
+  for _, g in ipairs(BAL.GROUPS) do
+    local P = sent[g] or 0
+    local sa, sb = 0, 0
+    for _, th in ipairs(group[g]) do
+      local a = tq[th.name]
+      if a and a > 0.01 then sa = sa + a elseif a and a < -0.01 then sb = sb - a end
+    end
+    if P > 0 and sa > 0 and sb > 0 then
+      local want = 0   -- turn acceleration wanted from this group (rad/s^2 at full power)
+      if not turning then
+        BAL.i[g] = clamp((BAL.i[g] or 0) + rate * dt, -1, 1)
+        want = -(BALANCE_DAMP * rate + BALANCE_LEARN * BAL.i[g]) * 15 / P
+      end
+      local ua, ub = 1, 1
+      if sa - sb > want then ua = clamp((sb + want) / sa, 0, 1) else ub = clamp((sa - want) / sb, 0, 1) end
+      for _, th in ipairs(group[g]) do
+        local a = tq[th.name]
+        if a and a > 0.01 then u[th.name .. g] = ua elseif a and a < -0.01 then u[th.name .. g] = ub end
+      end
+    else
+      BAL.i[g] = 0
+    end
+  end
+end
+
 -- Sets every group's power in one go (each call takes a tick). A thruster
 -- with several jobs fires at the strongest of them.
 local function setGroups(want)
@@ -464,10 +513,13 @@ local function setGroups(want)
       groupSent[g] = p
     end
   end
+  BAL.factors(groupSent)
   local calls = {}
   for _, t in ipairs(moveT) do
     local p = 0
-    for g in pairs(t.jobs) do p = math.max(p, groupSent[g] or 0) end
+    for g in pairs(t.jobs) do
+      p = math.max(p, math.floor((groupSent[g] or 0) * (BAL.u[t.name .. g] or 1) + 0.5))
+    end
     if thrusterSent[t.name] ~= p then
       thrusterSent[t.name] = p
       calls[#calls + 1] = powerCall(t, p)
@@ -593,6 +645,7 @@ local alt, vy, lastAltT = nil, 0, nil
 local posX, posZ = nil, nil
 local vx, vz = 0, 0
 local yaw, yawRate = nil, 0   -- heading of the ship's +X axis (radians) and how fast it turns
+BAL.rate = function() return yawRate end
 
 local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
 local function wrapAngle(a)
@@ -1325,6 +1378,33 @@ local function screen(title)
   bg(bcol) fg(colors.white) write(right)
   bg(colors.black)
   term.setCursorPos(1, 3)
+end
+
+-- cc-warship: the arm key on the typewriter (any screen but the key
+-- screens) arms or safes the cannons. Once per press; a speaker beeps
+-- high for armed, low for safe.
+function war.armLoop()
+  local latched = false
+  while true do
+    local ev, code = os.pullEvent()
+    local ak = keys[cfg.keys.arm]
+    if ev == "key" and code == ak and not latched and currentScreen ~= "Keybinds"
+        and currentScreen ~= "Typewriter test" and fromTypewriter(code) then
+      latched = true
+      local g = war.guns()
+      if g then
+        g.toggle()
+        war.cacheAt = -1
+        local gs = war.state()
+        log("guns %s (typewriter)", gs and gs.armed and "ARMED" or "safe")
+        if speaker then pcall(speaker.playNote, "pling", 1, gs and gs.armed and 18 or 6) end
+      else
+        log("arm key pressed but Fire Control isn't running")
+      end
+    elseif ev == "key_up" and code == ak then
+      latched = false
+    end
+  end
 end
 
 -- cc-warship: everything the captain's display shows about flying.
@@ -2311,6 +2391,31 @@ local function smartSetup()
     results[#results + 1] = { g = g, mag = mag }
     settle("Stopping...", 6)
   end
+  -- Balance: each thruster on its own, to see how much it turns the ship.
+  BAL.off = true
+  local torque = {}
+  for _, g in ipairs(BAL.GROUPS) do
+    if #group[g] >= 2 then
+      for _, th in ipairs(group[g]) do
+        if torque[th.name] == nil then
+          show("Balance: " .. th.name .. "...")
+          local r0, t0 = yawRate, now()
+          pcall(th.p.setPower, 15)
+          while now() - t0 < 0.6 do sleep(0.1) show("Balance: " .. th.name .. "...") end
+          pcall(th.p.setPower, 0)
+          local held = now() - t0
+          sleep(0.4)
+          torque[th.name] = (yawRate - r0) / held
+          thrusterSent[th.name] = nil
+          log("smart setup: %s alone turns %.3f rad/s^2", th.name, torque[th.name])
+          settle("Stopping...", 6)
+        end
+      end
+    end
+  end
+  BAL.off = false
+  cfg.torque = torque
+
   -- The nose is where the forward thrusters push (smart mode, autopilot).
   local f = cfg.push.forward
   if f then
@@ -2329,8 +2434,17 @@ local function smartSetup()
   print("")
   if L then out(" Turning      ", string.format("left %.2f  right %.2f rad/s2", L, R)) end
   for _, r in ipairs(results) do
+    local bal = ""
+    if #group[r.g] >= 2 then
+      local sa, sb = 0, 0
+      for _, th in ipairs(group[r.g]) do
+        local a = torque[th.name] or 0
+        if a > 0.01 then sa = sa + a elseif a < -0.01 then sb = sb - a end
+      end
+      bal = (sa > 0 and sb > 0) and "  balanced" or ((sa + sb > 0.05) and "  can't balance" or "  straight")
+    end
     out(string.format(" %-13s", LABEL[r.g]), r.mag >= 0.05 and string.format("%.2f b/s2", r.mag)
-      or { C.warn, "didn't move the ship" })
+      or { C.warn, "didn't move the ship" }, { bal == "  can't balance" and C.warn or C.dim, bal })
   end
   print("")
   hint(" B on the Fly screen (or the typewriter) stops")
@@ -2984,33 +3098,6 @@ local function pulseLoop()
       end
     elseif ev == "key_up" and code == pk then
       latchedAt = nil
-    end
-  end
-end
-
--- cc-warship: the arm key on the typewriter (any screen but the key
--- screens) arms or safes the cannons. Once per press; a speaker beeps
--- high for armed, low for safe.
-function war.armLoop()
-  local latched = false
-  while true do
-    local ev, code = os.pullEvent()
-    local ak = keys[cfg.keys.arm]
-    if ev == "key" and code == ak and not latched and currentScreen ~= "Keybinds"
-        and currentScreen ~= "Typewriter test" and fromTypewriter(code) then
-      latched = true
-      local g = war.guns()
-      if g then
-        g.toggle()
-        war.cacheAt = -1
-        local gs = war.state()
-        log("guns %s (typewriter)", gs and gs.armed and "ARMED" or "safe")
-        if speaker then pcall(speaker.playNote, "pling", 1, gs and gs.armed and 18 or 6) end
-      else
-        log("arm key pressed but Fire Control isn't running")
-      end
-    elseif ev == "key_up" and code == ak then
-      latched = false
     end
   end
 end
