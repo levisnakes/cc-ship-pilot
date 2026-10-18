@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.11.1"
+VERSION = "4.12.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -66,6 +66,7 @@ LOW_FUEL_LAND = 15      -- land by itself at this much time left (0 = never)
 FUEL_ALARM_PERCENT = 70 -- a connected speaker sounds an alarm below this much lava (0 = off)
 NAV_ARRIVE = 2          -- autopilot: this close to the target counts as there
 TURN_RATE = 0.6         -- fastest the computer turns the ship (radians per second)
+TURN_LAG = 0.4          -- seconds the turning thrusters take to respond (spool-up); more = gentler, no overshoot
 SMART_TURN_RATE = 0.45  -- smart mode: how fast A/D turn the ship (radians per second, ~26 deg/s)
 
 -- Website control: https://levisnakes.github.io/cc-ship-pilot/
@@ -830,10 +831,22 @@ local function turnFor(accel)
 end
 
 -- Turn toward a heading; nil just stops the ship turning.
+-- Holding a heading: turn only as fast as the turning thrusters can still
+-- stop from in time (they're often weak, and they spool up slowly), aim at
+-- where the ship will be after TURN_LAG, and leave tiny errors alone.
+-- Without this the ship overshoots and swings back and forth for ever.
 local function steerYaw(target)
   local wantRate = 0
-  if target then wantRate = clamp(1.2 * wrapAngle(target - yaw), -TURN_RATE, TURN_RATE) end
-  return turnFor((wantRate - yawRate) / 0.4)
+  if target then
+    local err = wrapAngle(target - yaw)
+    if math.abs(err) < 0.03 and math.abs(yawRate) < 0.03 then return 0, 0 end
+    -- braking the turn: the weaker side, at the power the computer may use
+    local a = math.min(math.abs(cfg.smart.left), math.abs(cfg.smart.right)) * TURN_POWER / 15
+    local lead = err - yawRate * TURN_LAG
+    local stopRate = math.sqrt(2 * a * 0.5 * math.abs(lead))
+    wantRate = clamp(math.min(stopRate, 1.0 * math.abs(lead)), 0, TURN_RATE) * (lead < 0 and -1 or 1)
+  end
+  return turnFor((wantRate - yawRate) / math.max(0.3, TURN_LAG))
 end
 
 local function noseYaw() return yaw + ((cfg.smart and cfg.smart.offset) or 0) end
@@ -905,6 +918,9 @@ end
 local function navLoop()
   local stoppedSince = nil
   while true do
+    -- This pass's autopilot / hold. Sending thruster powers takes a tick, and
+    -- a key (or the website) can cancel it meanwhile: then n ~= n.
+    local n = nav
     if landing then
       if lift.mode == "off" then
         landing = false
@@ -914,56 +930,57 @@ local function navLoop()
         lift.updown = -1
       end
     end
-    if nav and nav.mode == "brake" and posX then
+    if n and n.mode == "brake" and posX then
       -- First kill the drift, then hold the spot where it stopped. The
       -- lift does the same up and down; turning holds the heading.
       local speed = math.sqrt(vx * vx + vz * vz)
       local ax, az
-      if nav.phase == "stop" then
+      if n.phase == "stop" then
         ax, az = -HOLD_KD * vx, -HOLD_KD * vz
         if speed < 0.3 and math.abs(yawRate) < 0.05 then
           stoppedSince = stoppedSince or now()
           if now() - stoppedSince > 0.5 then
-            nav.phase, nav.x, nav.z, nav.heading = "hold", posX, posZ, yaw
-            nav.ix, nav.iz = 0, 0
+            n.phase, n.x, n.z, n.heading = "hold", posX, posZ, yaw
+            n.ix, n.iz = 0, 0
             log("stop & hold: stopped, holding %.1f %.1f", posX, posZ)
           end
         else
           stoppedSince = nil
         end
       else
-        local ex, ez = nav.x - posX, nav.z - posZ
-        nav.ix = clamp(nav.ix + ex * 0.1, -8, 8)
-        nav.iz = clamp(nav.iz + ez * 0.1, -8, 8)
-        ax = HOLD_KP * ex + HOLD_KI * nav.ix - HOLD_KD * vx
-        az = HOLD_KP * ez + HOLD_KI * nav.iz - HOLD_KD * vz
+        local ex, ez = n.x - posX, n.z - posZ
+        n.ix = clamp(n.ix + ex * 0.1, -8, 8)
+        n.iz = clamp(n.iz + ez * 0.1, -8, 8)
+        ax = HOLD_KP * ex + HOLD_KI * n.ix - HOLD_KD * vx
+        az = HOLD_KP * ez + HOLD_KI * n.iz - HOLD_KD * vz
       end
       -- Tiny pushes only make it twitch.
       if math.sqrt(ax * ax + az * az) < 0.05 then ax, az = 0, 0 end
       local want = HOLD.pushFor(ax, az)
-      if smartReady() then want.left, want.right = steerYaw(nav.heading) end
+      if smartReady() then want.left, want.right = steerYaw(n.heading) end
       setGroups(want)
       thrust = want.forward or 0
+      if nav ~= n then allThrustOff() end
       if not HOLD.ready() then
-        nav.status = "run Smart setup (S) first"
-      elseif nav.phase == "stop" then
-        nav.status = string.format("stopping, %.1f b/s", speed)
+        n.status = "run Smart setup (S) first"
+      elseif n.phase == "stop" then
+        n.status = string.format("stopping, %.1f b/s", speed)
       else
-        local dx, dz = nav.x - posX, nav.z - posZ
-        nav.status = string.format("holding (%.1f off)", math.sqrt(dx * dx + dz * dz))
+        local dx, dz = n.x - posX, n.z - posZ
+        n.status = string.format("holding (%.1f off)", math.sqrt(dx * dx + dz * dz))
       end
-    elseif nav and posX then
+    elseif n and posX then
       if not navReady() then
-        nav.status = "needs Smart setup first"
+        n.status = "needs Smart setup first"
       else
         -- Height: take off if parked, then hold the target's Y (or this one).
         if lift.mode ~= "fly" and liftAvailable() then
           lift.mode = "fly"
           lift.hover = math.max(shift, cfg.hover or 0)
         end
-        if lift.updown == 0 then lift.holdAlt = nav.y or lift.holdAlt or alt lift.stopping = false end
+        if lift.updown == 0 then lift.holdAlt = n.y or lift.holdAlt or alt lift.stopping = false end
 
-        local dx, dz = nav.x - posX, nav.z - posZ
+        local dx, dz = n.x - posX, n.z - posZ
         local dist = math.sqrt(dx * dx + dz * dz)
         local dirX, dirZ = 0, 0
         if dist > 0.01 then dirX, dirZ = dx / dist, dz / dist end
@@ -979,7 +996,7 @@ local function navLoop()
         -- opposite way and uses the back thrusters, whichever is less turning.
         local ex, ez = wx - vx, wz - vz
         local need = math.sqrt(ex * ex + ez * ez)
-        local heading = nav.course or yaw
+        local heading = n.course or yaw
         -- Once there, only turn again for a real drift, so it doesn't spin
         -- in place chasing tiny errors.
         local reaim = dist > NAV_ARRIVE and 0.25 or 0.8
@@ -989,7 +1006,7 @@ local function navLoop()
             h = h + math.pi
           end
           heading = wrapAngle(h)
-          nav.course = heading
+          n.course = heading
         end
         local l, r = steerYaw(heading)
         local ny = noseYaw()
@@ -1003,21 +1020,22 @@ local function navLoop()
         end
         setGroups({ forward = fwd, back = back, left = l, right = r })
         thrust = fwd
+        if nav ~= n then allThrustOff() end
 
         local moving = math.sqrt(vx * vx + vz * vz)
-        if nav.mode == "goto" then
-          nav.status = string.format("%.0f blocks to go, %.1f b/s", dist, moving)
+        if n.mode == "goto" then
+          n.status = string.format("%.0f blocks to go, %.1f b/s", dist, moving)
           if dist < NAV_ARRIVE and moving < 0.5 then
             stoppedSince = stoppedSince or now()
             if now() - stoppedSince > 1 then
-              nav.mode, nav.status = "hold", "arrived - holding here"
+              n.mode, n.status = "hold", "arrived - holding here"
               log("autopilot: arrived at %.1f %.1f", posX, posZ)
             end
           else
             stoppedSince = nil
           end
         else
-          nav.status = string.format("holding position (%.1f off)", dist)
+          n.status = string.format("holding position (%.1f off)", dist)
         end
       end
     end
