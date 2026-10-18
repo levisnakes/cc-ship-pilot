@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.7.0"
+VERSION = "4.8.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -47,8 +47,8 @@ ALT_HOLD = true         -- hold height on a Sable ship (needs CC: Sable)
 CLIMB_SPEED = 8         -- blocks per second up or down while the key is held
 DOWN_POWER = 15         -- most power the down thrusters use (0-15)
 DOWN_GAIN = 3           -- holding height: down power per block/s too fast upward (lift already at 0)
-PULSE_LOCK = 1          -- up/down do nothing for this many seconds after a Q pulse (it holds height)
-PULSE_TICKS = 4         -- Q pulse: game ticks the signal drops for (set in Gearshifts with +/-)
+PULSE_LOCK = 1          -- up/down do nothing for this many seconds after a pulse (it holds height)
+PULSE_TICKS = 4         -- Pulse: game ticks the signal drops for (set in Gearshifts with +/-)
 LIFT_GAIN = 20          -- lift change per block/s of vertical speed error
 LIFT_LEARN = 8          -- how fast it fine-tunes the hover level
 -- Without altitude hold: how far up/down keys move the lift from the hover level.
@@ -97,17 +97,17 @@ local ACTIONS = {
   { id = "faster",  label = "Faster" },
   { id = "slower",  label = "Slower" },
   { id = "boost",   label = "Boost" },
-  { id = "pulse",   label = "Q pulse" },
+  { id = "pulse",   label = "Pulse" },
   { id = "sleft",   label = "Strafe left" },
   { id = "sright",  label = "Strafe right" },
   { id = "brake",   label = "Stop & hold" },
 }
 local DEFAULT_KEYS = { forward = "w", back = "s", left = "a", right = "d", up = "space", down = "leftShift",
-  faster = "up", slower = "down", boost = "leftCtrl", pulse = "q", sleft = "left", sright = "right", brake = "b" }
+  faster = "up", slower = "down", boost = "leftCtrl", pulse = "r", sleft = "q", sright = "e", brake = "b" }
 -- cc-warship: a typewriter key arms and safes the auto cannons.
 if WARSHIP then
   ACTIONS[#ACTIONS + 1] = { id = "arm", label = "Arm/safe guns" }
-  DEFAULT_KEYS.arm = "g"
+  DEFAULT_KEYS.arm = "f"
 end
 
 local function clamp(v, lo, hi)
@@ -280,11 +280,26 @@ local function loadConfig()
     cfg.climb39 = true
     if cfg.tune.CLIMB_SPEED == nil or cfg.tune.CLIMB_SPEED == 4 then cfg.tune.CLIMB_SPEED = 8 end
   end
-  -- v4.5.1: the Q pulse drives a toggle latch, which only wants a short
+  -- v4.5.1: the pulse drives a toggle latch, which only wants a short
   -- on-pulse; make that the default once (O in Gearshifts switches back).
   if not cfg.blip451 then
     cfg.blip451 = true
     cfg.pulseBlip = true
+  end
+  -- v4.8: Q/E strafe and F arms the guns; the pulse moves off Q to R.
+  -- Once, swapping with whatever already had those keys.
+  if not cfg.keysQE48 then
+    cfg.keysQE48 = true
+    local function bind(id, name)
+      for other, k in pairs(cfg.keys) do
+        if k == name and other ~= id then cfg.keys[other] = cfg.keys[id] end
+      end
+      cfg.keys[id] = name
+    end
+    if cfg.keys.pulse == "q" then bind("pulse", "r") end
+    bind("sleft", "q")
+    bind("sright", "e")
+    if WARSHIP then bind("arm", "f") end
   end
   for name, v in pairs(cfg.tune) do _ENV[name] = v end
 end
@@ -306,8 +321,8 @@ local function setOutput(o, on)
   end
 end
 
--- The Q pulse output: a relay side that's always on, except for a tick
--- each time Q is pressed on the typewriter.
+-- The Pulse output: a relay side that's always on, except for a tick
+-- each time the pulse key is pressed on the typewriter.
 local function isPulse(o)
   return cfg.pulse ~= nil and o.relay == cfg.pulse.relay and o.side == cfg.pulse.side
 end
@@ -328,7 +343,7 @@ local function allRelaysOff()
 end
 
 local pulsing, lastPulse, pulseMissingAt = false, nil, nil
-local upDownLockUntil = nil   -- no up/down until then (after a Q pulse)
+local upDownLockUntil = nil   -- no up/down until then (after a pulse)
 local function pulse()
   if not cfg.pulse or pulsing then return end
   pulsing = true
@@ -340,7 +355,7 @@ local function pulse()
   setOutput(cfg.pulse, rest)
   pulsing, lastPulse = false, now()
   upDownLockUntil = now() + PULSE_LOCK   -- ...or for PULSE_LOCK seconds after it
-  log("Q pulse sent (%s, %d ticks)", cfg.pulseBlip and "blip" or "drop", cfg.pulseTicks or PULSE_TICKS)
+  log("Pulse sent (%s, %d ticks)", cfg.pulseBlip and "blip" or "drop", cfg.pulseTicks or PULSE_TICKS)
 end
 
 local currentMove = nil
@@ -716,7 +731,7 @@ local function liftStep(dt)
     lift.status = ud > 0 and "climbing" or ud < 0 and "descending"
       or string.format("hovering at %.1f", lift.holdAlt or alt)
     if downPower > 0 then lift.status = lift.status .. " (down " .. downPower .. ")" end
-    if locked then lift.status = lift.status .. " - Q lock" end
+    if locked then lift.status = lift.status .. " - pulse lock" end
   else
     local base = cfg.hover or lift.hover or shift
     lift.hover = base
@@ -1643,13 +1658,13 @@ local function flyScreen()
         end
         if relayError then msgs[#msgs + 1] = { { C.bad, " Relay error: " .. relayError } } end
         msgs[#msgs + 1] = war.line()
-        if lastPulse and now() - lastPulse < 1.5 then msgs[#msgs + 1] = { { C.head, " Q pulse sent" } } end
+        if lastPulse and now() - lastPulse < 1.5 then msgs[#msgs + 1] = { { C.head, " Pulse sent" } } end
         if pulseMissingAt and now() - pulseMissingAt < 3 then
-          msgs[#msgs + 1] = { { C.warn, " Q pulse: no relay side set (Gearshifts, X)" } }
+          msgs[#msgs + 1] = { { C.warn, " Pulse: no relay side set (Gearshifts, X)" } }
         end
         if not throttleSeen then
-          msgs[#msgs + 1] = { { C.dim, " Arrows, Ctrl, B, Q: bind them to a link frequency" } }
-          msgs[#msgs + 1] = { { C.dim, " on the typewriter (sneak + right-click it)." } }
+          msgs[#msgs + 1] = { { C.dim, " Q E F R B, Ctrl, arrows: bind them to a link" } }
+          msgs[#msgs + 1] = { { C.dim, " frequency on the typewriter (sneak + right-click)." } }
         end
         for i = 1, math.min(#msgs, 6) do out(table.unpack(msgs[i])) end
         local items = { { "Q", "Menu", { char = "q" } }, { "-", "", { char = "-" } }, { "+", "", { char = "+" } },
@@ -1753,7 +1768,7 @@ end
 
 -- Switch relay sides by hand until the ship does what you want, then save
 -- that combination as turn left, turn right or backward - or one side as
--- the Q pulse output.
+-- the pulse output.
 local function gearshiftSetup()
   if nav then navStop("opened " .. "gearshiftSetup") end
   landing = false
@@ -1787,7 +1802,7 @@ local function gearshiftSetup()
       local o = list[first + i]
       if o then
         out(" ", { C.key, tostring(i) }, string.format("  %-20s ", (#relays > 1 and (o.relay .. " ") or "") .. o.side),
-          onOff(on[first + i]), isPulse(o) and { C.head, "  Q pulse" } or "")
+          onOff(on[first + i]), isPulse(o) and { C.head, "  Pulse" } or "")
       end
     end
     term.setCursorPos(1, 14)
@@ -1796,7 +1811,7 @@ local function gearshiftSetup()
     out(" ", { C.key, "R" }, "  turn right  ", { C.dim, describe(cfg.moves.right) })
     out(" ", { C.key, "B" }, "  backward    ", { C.dim, describe(cfg.moves.back) })
     local pt = cfg.pulseTicks or PULSE_TICKS
-    out(" ", { C.key, "X" }, "  Q pulse     ",
+    out(" ", { C.key, "X" }, "  Pulse       ",
       { C.dim, cfg.pulse and (cfg.pulse.relay:gsub("^redstone_", "") .. " " .. cfg.pulse.side) or "none" }, "  ",
       { C.key, "+/-" }, string.format(" %d tick%s  ", pt, pt == 1 and "" or "s"), { C.key, "T" }, " test")
     local items = { { "C", "All off", { char = "c" } } }
@@ -1827,12 +1842,12 @@ local function gearshiftSetup()
       local cur = {}
       for i, o in ipairs(list) do if on[i] then cur[#cur + 1] = o end end
       if #cur == 0 then
-        if cfg.pulse then log("gearshift setup: Q pulse removed") end
+        if cfg.pulse then log("gearshift setup: Pulse removed") end
         cfg.pulse = nil
         saveConfig()
-        note = "Q pulse removed (switch one side on, then X)."
+        note = "Pulse removed (switch one side on, then X)."
       elseif #cur > 1 then
-        note = "Switch exactly one side on for the Q pulse."
+        note = "Switch exactly one side on for the pulse."
       else
         cfg.pulse = { relay = cur[1].relay, side = cur[1].side }
         -- It can't also be part of a move.
@@ -1842,22 +1857,22 @@ local function gearshiftSetup()
           cfg.moves[id] = keep
         end
         saveConfig()
-        log("gearshift setup: Q pulse = %s", describe({ cfg.pulse }))
+        log("gearshift setup: Pulse = %s", describe({ cfg.pulse }))
       end
     elseif ch == "+" or ch == "=" or ch == "-" then
       cfg.pulseTicks = clamp((cfg.pulseTicks or PULSE_TICKS) + (ch == "-" and -1 or 1), 1, 40)
       saveConfig()
-      log("gearshift setup: Q pulse length %d ticks", cfg.pulseTicks)
+      log("gearshift setup: Pulse length %d ticks", cfg.pulseTicks)
     elseif ch == "o" then
       cfg.pulseBlip = not cfg.pulseBlip
       saveConfig()
       pulseOn()
       readOn()
-      note = cfg.pulseBlip and "Q pulse: off, blips on (for a toggle latch)." or "Q pulse: on, drops off."
-      log("gearshift setup: Q pulse type %s", cfg.pulseBlip and "blip" or "drop")
+      note = cfg.pulseBlip and "Pulse: off, blips on (for a toggle latch)." or "Pulse: on, drops off."
+      log("gearshift setup: Pulse type %s", cfg.pulseBlip and "blip" or "drop")
     elseif ch == "t" then
       if not cfg.pulse then
-        note = "Set the Q pulse side first: one side on, then X."
+        note = "Set the pulse side first: one side on, then X."
       else
         pulse()
         readOn()
@@ -2602,7 +2617,7 @@ local function menu()
     tile(L, 12, w, "H", "Hover", "calibrate hovering")
     tile(R, 12, w, "U", "Tuning", "power, speed, response")
     tile(L, 14, w, "K", "Keybinds", "typewriter keys")
-    tile(R, 14, w, "G", "Gearshifts", "relay turning, Q pulse")
+    tile(R, 14, w, "G", "Gearshifts", "relay turning, pulse")
     tile(L, 16, w, "T", "Typewriter test", "see what keys arrive")
     tile(R, 16, w, "M", "Manual test", "relays, thrust, lift")
     if REMOTE and remoteId then
@@ -2933,7 +2948,7 @@ log("settings: FORWARD_POWER=%s THRUST_RAMP=%s ALT_HOLD=%s CLIMB_SPEED=%s LIFT_G
 pcall(mirrorToMonitor)
 REMOTE = REMOTE and http ~= nil and http.websocket ~= nil
 if REMOTE then remoteId = loadRemoteId() log("website code %s", remoteId) end
--- Q on the typewriter (any screen but the key screens): the pulse output
+-- The pulse key on the typewriter (any screen but the key screens): the output
 -- drops for PULSE_TICKS ticks. Once per press.
 local function pulseLoop()
   local latchedAt = nil
@@ -2946,7 +2961,7 @@ local function pulseLoop()
       latchedAt = now()
       if cfg.pulse then pulse() else
         pulseMissingAt = now()
-        log("Q pressed but no pulse output is set")
+        log("pulse key pressed but no pulse output is set")
       end
     elseif ev == "key_up" and code == pk then
       latchedAt = nil
