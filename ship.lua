@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.5.1"
+VERSION = "4.6.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -1267,6 +1267,21 @@ local function tile(x, y, w, k, title, desc)
   buttons[#buttons + 1] = { x1 = x, x2 = x + w - 1, y1 = y, y2 = y + 1, char = k:lower() }
 end
 
+-- cc-warship runs Fire Control next to this program and hands its
+-- controls over (WARSHIP.guns); without it there are no guns.
+-- (One table: the main chunk is near Lua's 200-locals limit.)
+local war = { cacheAt = -1 }
+function war.guns() return WARSHIP and WARSHIP.guns end
+function war.state()
+  local g = war.guns()
+  if not g then return nil end
+  if now() - war.cacheAt > 0.05 then
+    local ok, st = pcall(g.state)
+    war.cache, war.cacheAt = ok and st or nil, now()
+  end
+  return war.cache
+end
+
 local currentScreen = nil
 local function screen(title)
   buttons = {}
@@ -1279,10 +1294,14 @@ local function screen(title)
   term.clear()
   term.setCursorPos(1, 1)
   local badge, bcol = liftBadge()
-  local left = COLOR and (" Ship Pilot v" .. VERSION .. "  \16 " .. title) or (" Ship Pilot v" .. VERSION .. " > " .. title)
+  local name = WARSHIP and "Warship" or ("Ship Pilot v" .. VERSION)
+  local left = COLOR and (" " .. name .. "  \16 " .. title) or (" " .. name .. " > " .. title)
   local right = COLOR and (" " .. badge .. " ") or ("[" .. badge .. "]")
+  local gs = war.state()
+  local armedBadge = gs and gs.armed and (COLOR and " ARMED " or "[ARMED]") or ""
   bg(C.bar)
-  write(left .. string.rep(" ", math.max(1, W - #left - #right)))
+  write(left .. string.rep(" ", math.max(1, W - #left - #right - #armedBadge)))
+  if armedBadge ~= "" then bg(colors.red) fg(colors.white) write(armedBadge) end
   bg(bcol) fg(colors.white) write(right)
   bg(colors.black)
   term.setCursorPos(1, 3)
@@ -1331,6 +1350,21 @@ local function fuelParts()
   parts[#parts + 1] = { C.dim, rate }
   if fuel.left then parts[#parts + 1] = { fuel.low and C.bad or colors.white, "  " .. timeText(fuel.left) .. " left" } end
   return parts
+end
+
+-- The guns' line on the Fly screen (cc-warship only).
+function war.line()
+  local gs = war.state()
+  if gs then
+    local firing = 0
+    for _, m in ipairs(gs.mounts) do if m.state == "FIRE" or m.state == "FIRING" then firing = firing + 1 end end
+    local t = gs.targets[1]
+    return { gs.armed and { C.bad, " GUNS ARMED" } or { C.dim, " Guns safe" },
+      t and string.format("  %s %.0fm", t.kind:sub(1, 12), t.d) or { C.dim, "  no targets" },
+      firing > 0 and { C.bad, string.format("  firing %d", firing) } or "" }
+  elseif WARSHIP and WARSHIP.gunsError then
+    return { { C.bad, " Guns stopped" }, { C.dim, "  (menu A)" } }
+  end
 end
 
 local function flyScreen()
@@ -1603,6 +1637,7 @@ local function flyScreen()
           end
         end
         if relayError then msgs[#msgs + 1] = { { C.bad, " Relay error: " .. relayError } } end
+        msgs[#msgs + 1] = war.line()
         if lastPulse and now() - lastPulse < 1.5 then msgs[#msgs + 1] = { { C.head, " Q pulse sent" } } end
         if pulseMissingAt and now() - pulseMissingAt < 3 then
           msgs[#msgs + 1] = { { C.warn, " Q pulse: no relay side set (Gearshifts, X)" } }
@@ -2422,6 +2457,102 @@ local function systemsScreen()
   end
 end
 
+-- cc-warship: Fire Control's status and controls. The radar aims; Fire
+-- Control fires when a shot would hit and never through your own ship.
+function war.screen()
+  local msg, msgAt = nil, 0
+  while true do
+    screen("Auto cannons")
+    local g, gs = war.guns(), war.state()
+    if not gs then
+      if WARSHIP.gunsError then
+        out({ C.bad, " Fire Control stopped:" })
+        out({ C.dim, " " .. tostring(WARSHIP.gunsError):match("^[^\n]*"):sub(1, W - 2) })
+        print("")
+        hint(" R restarts it.")
+      else
+        hint(" Fire Control is starting (needs fire_control.lua 1.4.0+).")
+      end
+      footer({ { "R", "Restart", { char = "r" } }, { "Q", "Menu", { char = "q" } } })
+    else
+      out(" Cannons   ", gs.armed and { C.bad, "ARMED" } or { C.good, "SAFE" },
+        { C.dim, gs.armed and "  firing when a shot would hit" or "  watching only" })
+      out(" Radar     ", gs.radar and { C.head, gs.radar } or { C.bad, "MISSING" },
+        gs.radarError and { C.bad, ("  " .. tostring(gs.radarError)):sub(1, W - 13 - #(gs.radar or "MISSING")) } or "")
+      out(" Rounds    ", string.format("%.1f b/t ", gs.speed), { C.dim, gs.speedLearned and "learned" or
+        (gs.learning and string.format("learning %d/5", gs.learning) or "SHOT_SPEED") },
+        { C.dim, gs.autocannon and "   autocannon" or "   big cannon" })
+      out(" Ship      ", string.format("%.0f m/s   rock ", gs.shipSpeed),
+        { gs.rock > gs.maxRock and C.warn or colors.white, string.format("%.1f", gs.rock) },
+        gs.rock > gs.maxRock and { C.warn, "  holding fire" } or "")
+      if #gs.targets == 0 then
+        out(" Targets   ", { C.dim, "none in range" })
+      else
+        for i, t in ipairs(gs.targets) do
+          out(i == 1 and " Targets " or "         ", i == 1 and { C.warn, "> " } or "  ",
+            { i == 1 and C.warn or C.dim, string.format("%s %s %.0fm %.0fm/s", t.cat, t.kind:sub(1, 12), t.d, t.speed) },
+            t.ago > 1 and { C.dim, string.format(" (%.0fs ago)", t.ago) } or "")
+        end
+      end
+      local _, y = cursor()
+      y = (y or 10) + 1
+      if #gs.mounts == 0 then
+        term.setCursorPos(1, y)
+        out({ C.bad, " No cannon mounts found (right-click the modems)." })
+      end
+      -- Cannons: one column, two when there are many.
+      local rows = math.max(1, H - 1 - y)
+      local cols = #gs.mounts > rows and 2 or 1
+      if cols == 2 then rows = math.min(rows, math.ceil(#gs.mounts / 2)) end
+      local cw = cols == 2 and 25 or W - 2
+      for i, m in ipairs(gs.mounts) do
+        local col, row = math.floor((i - 1) / rows), (i - 1) % rows
+        if col >= cols then break end
+        term.setCursorPos(2 + col * cw, y + row)
+        local st = m.state or ""
+        local c = colors.lightGray
+        if st == "FIRE" or st == "FIRING" then c = C.bad
+        elseif st == "ON TARGET" then c = C.good
+        elseif st == "points at own ship" or st == "own ship in line" then c = C.warn end
+        local tag = m.side == "left" and "L" or (m.side == "right" and "R" or "?")
+        local line = string.format("%-8s %s %s", m.name:gsub("^cannon_", ""):sub(1, 8), tag, st)
+        if cols == 1 and m.miss and m.miss < 1e6 then
+          line = line .. string.format("  miss %.0f", m.miss)
+          if m.miss > gs.hitRadius and m.dy and math.abs(m.dy) > m.miss * 0.5 then line = line .. (m.dy > 0 and " high" or " low") end
+        end
+        fg(c) write(line:sub(1, cw - 1)) fg(colors.white)
+      end
+      term.setCursorPos(2, y - 1)
+      if gs.fireControllers > 0 then
+        fg(C.bad) write("Fire Controller on the network: remove it!") fg(colors.white)
+      elseif msg and now() - msgAt < 2 then
+        fg(C.head) write(msg) fg(colors.white)
+      end
+      footer({ { "A", gs.armed and "Safe" or "Arm", { char = "a" } }, { "F", "Fire", { char = "f" } },
+        { "X", "Ignore", { char = "x" } }, { "U", "Unignore", { char = "u" } }, { "Q", "Menu", { char = "q" } } })
+    end
+    local timer = os.startTimer(0.25)
+    local ev, a = os.pullEvent()
+    os.cancelTimer(timer)
+    -- Typewriter letters fly the ship; only the computer's keys (and taps) work here.
+    if ev == "char" and not typewriterChar(a:lower()) then
+      local c = a:lower()
+      if c == "q" then return
+      elseif c == "r" and not gs and WARSHIP.restartGuns then WARSHIP.restartGuns()
+      elseif g and gs then
+        if c == "a" then
+          g.toggle()
+          log("guns %s", gs.armed and "safe" or "ARMED")
+        elseif c == "f" then g.fire() msg, msgAt = "Firing every cannon that's clear of the ship", now()
+        elseif c == "x" then
+          msg, msgAt = g.ignoreNearest() and "Nearest target ignored for good" or "No target to ignore", now()
+        elseif c == "u" then g.unignoreAll() msg, msgAt = "Nothing ignored now", now() end
+        war.cacheAt = -1
+      end
+    end
+  end
+end
+
 local function menu()
   while true do
     screen("Menu")
@@ -2453,7 +2584,14 @@ local function menu()
 
     local L, R, w = 2, 27, 24
     tile(L, 8, w, "F", "Fly", "fly with typewriter")
-    tile(R, 8, w, "A", "Go to", nav and "autopilot ON" or "autopilot to coords")
+    if WARSHIP then
+      local gs = war.state()
+      tile(R, 8, w, "A", "Auto cannons", not gs and (WARSHIP.gunsError and "STOPPED - tap to see" or "starting")
+        or string.format("%s  %d gun%s  %d tgt", gs.armed and "ARMED" or "safe", #gs.mounts,
+          #gs.mounts == 1 and "" or "s", #gs.targets))
+    else
+      tile(R, 8, w, "A", "Go to", nav and "autopilot ON" or "autopilot to coords")
+    end
     tile(L, 10, w, "P", "Thrusters", "jobs for each thruster")
     tile(R, 10, w, "S", "Smart setup", navReady() and "done - redo any time" or "needed for smart/auto")
     tile(L, 12, w, "H", "Hover", "calibrate hovering")
@@ -2476,6 +2614,7 @@ local function menu()
     end
     local ch = waitChar("ftkghupmasyx")
     if ch == "f" then flyScreen()
+    elseif ch == "a" and WARSHIP then war.screen()
     elseif ch == "a" then if nav then autopilotScreen() else gotoScreen() end
     elseif ch == "s" then smartSetup()
     elseif ch == "y" then systemsScreen()
