@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.8.0"
+VERSION = "4.9.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -1325,6 +1325,25 @@ local function screen(title)
   bg(bcol) fg(colors.white) write(right)
   bg(colors.black)
   term.setCursorPos(1, 3)
+end
+
+-- cc-warship: everything the captain's display shows about flying.
+function war.pilotState()
+  local badge = liftBadge()
+  local over = 0
+  for _, m in ipairs(machineInfo) do if m.over then over = over + 1 end end
+  local amount = fuel.tank + fuel.inThrusters
+  return {
+    badge = badge, liftStatus = lift.status, liftMode = lift.mode, lift = shift, hover = cfg.hover,
+    alt = alt, vy = vy, x = posX, z = posZ, vx = vx, vz = vz,
+    heading = yaw and noseYaw() or nil, turnRate = yawRate,
+    throttle = FORWARD_POWER, power = groupPower, boost = boostOn,
+    smart = cfg.smartOn, smartReady = smartReady(),
+    nav = nav and { mode = nav.mode, status = nav.status, x = nav.x, y = nav.y, z = nav.z } or nil,
+    fuel = fuelKnown() and { amount = amount, cap = fuel.cap, rate = fuel.rate, left = fuel.left, low = fuel.low } or nil,
+    fuelAlarm = fuelAlarm, alarmMuted = alarmMuted, overstressed = over,
+    screen = currentScreen, typewriter = typewriter ~= nil, relayError = relayError, onSable = onSable,
+  }
 end
 
 -- A character typed on the typewriter (not the computer's keyboard).
@@ -2997,7 +3016,11 @@ function war.armLoop()
 end
 
 local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop, fuelLoop, alarmLoop, boostSoundLoop, pulseLoop }
-if WARSHIP then loops[#loops + 1] = war.armLoop end
+-- cc-warship: the captain's display reads the pilot's state through this.
+if WARSHIP then
+  WARSHIP.pilot = { version = VERSION, state = war.pilotState }
+  loops[#loops + 1] = war.armLoop
+end
 if REMOTE then loops[#loops + 1] = remoteLoop loops[#loops + 1] = telemetryLoop end
 local ok, err = xpcall(function() parallel.waitForAny(table.unpack(loops)) end, debug.traceback)
 log("stopped: %s", ok and "ok" or tostring(err))
