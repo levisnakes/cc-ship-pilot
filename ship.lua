@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.6.0"
+VERSION = "4.7.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -104,6 +104,11 @@ local ACTIONS = {
 }
 local DEFAULT_KEYS = { forward = "w", back = "s", left = "a", right = "d", up = "space", down = "leftShift",
   faster = "up", slower = "down", boost = "leftCtrl", pulse = "q", sleft = "left", sright = "right", brake = "b" }
+-- cc-warship: a typewriter key arms and safes the auto cannons.
+if WARSHIP then
+  ACTIONS[#ACTIONS + 1] = { id = "arm", label = "Arm/safe guns" }
+  DEFAULT_KEYS.arm = "g"
+end
 
 local function clamp(v, lo, hi)
   if v < lo then return lo elseif v > hi then return hi end
@@ -1701,7 +1706,7 @@ end
 local function keybinds()
   while true do
     screen("Keybinds")
-    local KB = "1234567890abc"
+    local KB = "1234567890abcd"
     for i, act in ipairs(ACTIONS) do
       out(" ", { C.key, KB:sub(i, i):upper() }, string.format("  %-13s ", act.label), { C.head, cfg.keys[act.id] })
     end
@@ -2949,7 +2954,35 @@ local function pulseLoop()
   end
 end
 
+-- cc-warship: the arm key on the typewriter (any screen but the key
+-- screens) arms or safes the cannons. Once per press; a speaker beeps
+-- high for armed, low for safe.
+function war.armLoop()
+  local latched = false
+  while true do
+    local ev, code = os.pullEvent()
+    local ak = keys[cfg.keys.arm]
+    if ev == "key" and code == ak and not latched and currentScreen ~= "Keybinds"
+        and currentScreen ~= "Typewriter test" and fromTypewriter(code) then
+      latched = true
+      local g = war.guns()
+      if g then
+        g.toggle()
+        war.cacheAt = -1
+        local gs = war.state()
+        log("guns %s (typewriter)", gs and gs.armed and "ARMED" or "safe")
+        if speaker then pcall(speaker.playNote, "pling", 1, gs and gs.armed and 18 or 6) end
+      else
+        log("arm key pressed but Fire Control isn't running")
+      end
+    elseif ev == "key_up" and code == ak then
+      latched = false
+    end
+  end
+end
+
 local loops = { liftLoop, ui, sampleLoop, touchLoop, navLoop, fuelLoop, alarmLoop, boostSoundLoop, pulseLoop }
+if WARSHIP then loops[#loops + 1] = war.armLoop end
 if REMOTE then loops[#loops + 1] = remoteLoop loops[#loops + 1] = telemetryLoop end
 local ok, err = xpcall(function() parallel.waitForAny(table.unpack(loops)) end, debug.traceback)
 log("stopped: %s", ok and "ok" or tostring(err))
