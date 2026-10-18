@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.12.2"
+VERSION = "4.13.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -114,10 +114,10 @@ local ACTIONS = {
 }
 local DEFAULT_KEYS = { forward = "w", back = "s", left = "a", right = "d", up = "space", down = "leftShift",
   faster = "up", slower = "down", boost = "leftCtrl", pulse = "r", sleft = "q", sright = "e", brake = "b" }
--- cc-warship: a typewriter key arms and safes the auto cannons.
+-- cc-warship: hold a typewriter key to fire the cannons.
 if WARSHIP then
-  ACTIONS[#ACTIONS + 1] = { id = "arm", label = "Arm/safe guns" }
-  DEFAULT_KEYS.arm = "f"
+  ACTIONS[#ACTIONS + 1] = { id = "fire", label = "Fire guns" }
+  DEFAULT_KEYS.fire = "f"
 end
 
 local function clamp(v, lo, hi)
@@ -263,6 +263,11 @@ local function loadConfig()
       for k, v in pairs(saved) do cfg[k] = v end
     end
   end
+  -- v4.13: the arm key became the fire key (same key).
+  if cfg.keys.arm then
+    cfg.keys.fire = cfg.keys.fire or cfg.keys.arm
+    cfg.keys.arm = nil
+  end
   for id, name in pairs(DEFAULT_KEYS) do cfg.keys[id] = cfg.keys[id] or name end
   -- v2.0 saved moves as numbers into an outputs list.
   if cfg.outputs then
@@ -309,7 +314,7 @@ local function loadConfig()
     if cfg.keys.pulse == "q" then bind("pulse", "r") end
     bind("sleft", "q")
     bind("sright", "e")
-    if WARSHIP then bind("arm", "f") end
+    if WARSHIP then bind("fire", "f") end
   end
   for name, v in pairs(cfg.tune) do _ENV[name] = v end
 end
@@ -1405,7 +1410,7 @@ local function screen(title)
   local left = COLOR and (" " .. name .. "  \16 " .. title) or (" " .. name .. " > " .. title)
   local right = COLOR and (" " .. badge .. " ") or ("[" .. badge .. "]")
   local gs = war.state()
-  local armedBadge = gs and gs.armed and (COLOR and " ARMED " or "[ARMED]") or ""
+  local armedBadge = gs and gs.firing and (COLOR and " FIRING " or "[FIRING]") or ""
   bg(C.bar)
   write(left .. string.rep(" ", math.max(1, W - #left - #right - #armedBadge)))
   if armedBadge ~= "" then bg(colors.red) fg(colors.white) write(armedBadge) end
@@ -1414,15 +1419,14 @@ local function screen(title)
   term.setCursorPos(1, 3)
 end
 
--- cc-warship: the arm key on the typewriter (any screen but the key
--- screens) arms or safes the cannons. Once per press; a speaker beeps
--- high for armed, low for safe.
+-- cc-warship: hold the fire key on the typewriter (any screen but the key
+-- screens) and every cannon that's clear of the ship fires.
 function war.armLoop()
   local latched = false
   local timer = os.startTimer(0.05)
   while true do
     local ev, code = os.pullEvent()
-    local ak = keys[cfg.keys.arm]
+    local ak = keys[cfg.keys.fire]
     -- Polled too (20 times a second), so a press is never missed.
     local press = false
     if ev == "timer" and code == timer then
@@ -1436,18 +1440,16 @@ function war.armLoop()
       cfg.armSeen = true
       saveConfig()
     end
-    if press and not latched and currentScreen ~= "Keybinds" and currentScreen ~= "Typewriter test" then
-      latched = true
+    if press and currentScreen ~= "Keybinds" and currentScreen ~= "Typewriter test" then
       local g = war.guns()
-      if g then
-        g.toggle()
+      if g and g.hold then
+        g.hold()
+        if not latched then log("guns: firing (typewriter)") end
         war.cacheAt = -1
-        local gs = war.state()
-        log("guns %s (typewriter)", gs and gs.armed and "ARMED" or "safe")
-        if speaker then pcall(speaker.playNote, "pling", 1, gs and gs.armed and 18 or 6) end
-      else
-        log("arm key pressed but Fire Control isn't running")
+      elseif not latched then
+        log("fire key pressed but Fire Control isn't running")
       end
+      latched = true
     end
   end
 end
@@ -1523,11 +1525,11 @@ function war.line()
     local firing = 0
     for _, m in ipairs(gs.mounts) do if m.state == "FIRE" or m.state == "FIRING" then firing = firing + 1 end end
     local t = gs.targets[1]
+    local fk = (cfg.keys.fire or "f"):upper()
     if not cfg.armSeen then
-      return { gs.armed and { C.bad, " GUNS ARMED" } or { C.dim, " Guns safe" },
-        { C.warn, string.format("  %s: bind it on the typewriter", (cfg.keys.arm or "f"):upper()) } }
+      return { { C.dim, " Guns" }, { C.warn, string.format("  %s fires: bind it on the typewriter", fk) } }
     end
-    return { gs.armed and { C.bad, " GUNS ARMED" } or { C.dim, " Guns safe" },
+    return { gs.firing and { C.bad, " FIRING" } or { C.dim, " Guns: hold " .. fk },
       t and string.format("  %s %.0fm", t.kind:sub(1, 12), t.d) or { C.dim, "  no targets" },
       firing > 0 and { C.bad, string.format("  firing %d", firing) } or "" }
   elseif WARSHIP and WARSHIP.gunsError then
@@ -2691,8 +2693,8 @@ function war.screen()
       end
       footer({ { "R", "Restart", { char = "r" } }, { "Q", "Menu", { char = "q" } } })
     else
-      out(" Cannons   ", gs.armed and { C.bad, "ARMED" } or { C.good, "SAFE" },
-        { C.dim, gs.armed and "  firing when a shot would hit" or "  watching only" })
+      out(" Cannons   ", gs.firing and { C.bad, "FIRING" } or { C.good, "READY" },
+        { C.dim, string.format("  hold %s on the typewriter to fire", (cfg.keys.fire or "f"):upper()) })
       out(" Radar     ", gs.radar and { C.head, gs.radar } or { C.bad, "MISSING" },
         gs.radarError and { C.bad, ("  " .. tostring(gs.radarError)):sub(1, W - 13 - #(gs.radar or "MISSING")) } or "")
       out(" Rounds    ", string.format("%.1f b/t ", gs.speed), { C.dim, gs.speedLearned and "learned" or
@@ -2751,7 +2753,7 @@ function war.screen()
       elseif msg and now() - msgAt < 2 then
         fg(C.head) write(msg) fg(colors.white)
       end
-      footer({ { "A", gs.armed and "Safe" or "Arm", { char = "a" } }, { "F", "Fire", { char = "f" } },
+      footer({ { "F", "Fire", { char = "f" } },
         { "X", "Ignore", { char = "x" } }, { "U", "Unignore", { char = "u" } }, { "Q", "Menu", { char = "q" } } })
     end
     local timer = os.startTimer(0.25)
@@ -2763,10 +2765,7 @@ function war.screen()
       if c == "q" then return
       elseif c == "r" and not gs and WARSHIP.restartGuns then WARSHIP.restartGuns()
       elseif g and gs then
-        if c == "a" then
-          g.toggle()
-          log("guns %s", gs.armed and "safe" or "ARMED")
-        elseif c == "f" then g.fire() msg, msgAt = "Firing every cannon that's clear of the ship", now()
+        if c == "f" then g.fire() msg, msgAt = "Firing every cannon that's clear of the ship", now()
         elseif c == "x" then
           msg, msgAt = g.ignoreNearest() and "Nearest target ignored for good" or "No target to ignore", now()
         elseif c == "u" then g.unignoreAll() msg, msgAt = "Nothing ignored now", now() end
@@ -2810,8 +2809,8 @@ local function menu()
     if WARSHIP then
       local gs = war.state()
       tile(R, 8, w, "A", "Auto cannons", not gs and (WARSHIP.gunsError and "STOPPED - tap to see" or "starting")
-        or string.format("%s  %d gun%s  %d tgt", gs.armed and "ARMED" or "safe", #gs.mounts,
-          #gs.mounts == 1 and "" or "s", #gs.targets))
+        or string.format("%d gun%s  %d tgt  %s fires", #gs.mounts,
+          #gs.mounts == 1 and "" or "s", #gs.targets, (cfg.keys.fire or "f"):upper()))
     else
       tile(R, 8, w, "A", "Go to", nav and "autopilot ON" or "autopilot to coords")
     end
