@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.11.0"
+VERSION = "4.11.1"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -2684,7 +2684,12 @@ function war.screen()
         { gs.rock > gs.maxRock and C.warn or colors.white, string.format("%.1f", gs.rock) },
         gs.rock > gs.maxRock and { C.warn, "  holding fire" } or "")
       if #gs.targets == 0 then
-        out(" Targets   ", { C.dim, "none in range" })
+        out(" Targets   ", { C.dim, "none" })
+        -- what the radar does see, and why it isn't a target
+        for i, o in ipairs(gs.others or {}) do
+          if i > 3 then break end
+          out("           ", { C.dim, string.format("%s %.0fm: ", o.cat, o.d) }, { C.warn, o.why:sub(1, W - 22) })
+        end
       else
         for i, t in ipairs(gs.targets) do
           out(i == 1 and " Targets " or "         ", i == 1 and { C.warn, "> " } or "  ",
