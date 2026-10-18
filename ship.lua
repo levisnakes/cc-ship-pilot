@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.13.0"
+VERSION = "4.14.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -2737,7 +2737,12 @@ function war.screen()
         if st == "FIRE" or st == "FIRING" then c = C.bad
         elseif st == "ON TARGET" then c = C.good
         elseif st == "points at own ship" or st == "own ship in line" then c = C.warn end
-        local tag = m.side == "left" and "L" or (m.side == "right" and "R" or "?")
+        local tag = m.side == "left" and "L" or (m.side == "right" and "R" or "A")
+        -- 1-9 (or a tap) switches this cannon's side
+        if i <= 9 and g and g.cycleSide then
+          fg(C.key) write(tostring(i)) fg(colors.white) write(" ")
+          buttons[#buttons + 1] = { x1 = 2 + col * cw, x2 = 2 + col * cw + cw - 2, y = y + row, char = tostring(i) }
+        end
         local line = string.format("%-8s %s %s", m.name:gsub("^cannon_", ""):sub(1, 8), tag, st)
         if cols == 1 and m.radarMode and m.aimErr then
           line = line .. string.format("  aim %.0f deg", m.aimErr)
@@ -2745,13 +2750,15 @@ function war.screen()
           line = line .. string.format("  miss %.0f", m.miss) .. (m.radius and string.format("/%.0f", m.radius) or "")
           if m.miss > gs.hitRadius and m.dy and math.abs(m.dy) > m.miss * 0.5 then line = line .. (m.dy > 0 and " high" or " low") end
         end
-        fg(c) write(line:sub(1, cw - 1)) fg(colors.white)
+        fg(c) write(line:sub(1, cw - 3)) fg(colors.white)
       end
       term.setCursorPos(2, y - 1)
       if gs.fireControllers > 0 then
         fg(C.bad) write("Fire Controller on the network: remove it!") fg(colors.white)
       elseif msg and now() - msgAt < 2 then
         fg(C.head) write(msg) fg(colors.white)
+      elseif #gs.mounts > 0 and g.cycleSide then
+        fg(C.dim) write("1-9 / tap a cannon: side Left, Right or Auto") fg(colors.white)
       end
       footer({ { "F", "Fire", { char = "f" } },
         { "X", "Ignore", { char = "x" } }, { "U", "Unignore", { char = "u" } }, { "Q", "Menu", { char = "q" } } })
@@ -2768,7 +2775,13 @@ function war.screen()
         if c == "f" then g.fire() msg, msgAt = "Firing every cannon that's clear of the ship", now()
         elseif c == "x" then
           msg, msgAt = g.ignoreNearest() and "Nearest target ignored for good" or "No target to ignore", now()
-        elseif c == "u" then g.unignoreAll() msg, msgAt = "Nothing ignored now", now() end
+        elseif c == "u" then g.unignoreAll() msg, msgAt = "Nothing ignored now", now()
+        elseif c:match("^%d$") and g.cycleSide and gs.mounts[tonumber(c)] then
+          local m = gs.mounts[tonumber(c)]
+          local side = g.cycleSide(m.name)
+          msg, msgAt = string.format("%s: %s", m.name:gsub("^cannon_", ""), side == "auto" and "Auto (from where it sits)" or side), now()
+          log("guns: %s side -> %s", m.name, side)
+        end
         war.cacheAt = -1
       end
     end
