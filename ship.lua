@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.12.0"
+VERSION = "4.12.1"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -2738,7 +2738,7 @@ function war.screen()
         local tag = m.side == "left" and "L" or (m.side == "right" and "R" or "?")
         local line = string.format("%-8s %s %s", m.name:gsub("^cannon_", ""):sub(1, 8), tag, st)
         if cols == 1 and m.miss and m.miss < 1e6 then
-          line = line .. string.format("  miss %.0f", m.miss)
+          line = line .. string.format("  miss %.0f", m.miss) .. (m.radius and string.format("/%.0f", m.radius) or "")
           if m.miss > gs.hitRadius and m.dy and math.abs(m.dy) > m.miss * 0.5 then line = line .. (m.dy > 0 and " high" or " low") end
         end
         fg(c) write(line:sub(1, cw - 1)) fg(colors.white)
