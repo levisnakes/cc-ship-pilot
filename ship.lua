@@ -30,7 +30,7 @@
 -- Everything that happens is written to ship.log (the previous run is kept
 -- as ship.log.old). To share it:  pastebin put ship.log
 
-VERSION = "4.10.0"
+VERSION = "4.11.0"
 
 -- ======================== SETTINGS ===========================
 -- Change these from the Tuning menu (U) on the computer; what you set
@@ -79,6 +79,8 @@ REMOTE_DAILY_LIMIT = 150  -- stop sending updates after this many a day
 -- Balance (needs Smart setup): thrusters in one group that sit off the
 -- center of mass turn the ship. The ones that turn it more get less power,
 -- so strafing, forward and reverse go straight.
+AUTO_HOLD = true        -- let go of every movement key and the ship stops and holds that spot (B switches it)
+AUTO_HOLD_DELAY = 0.4   -- seconds with no movement key before it holds
 BALANCE = true
 BALANCE_DAMP = 1.5      -- extra correction per rad/s the ship still turns
 BALANCE_LEARN = 0.6     -- how fast it takes out a turn that keeps going
@@ -886,6 +888,20 @@ function HOLD.toggle()
   log("stop & hold: on")
 end
 
+-- Auto-hold: Stop & hold by itself whenever no movement key is held.
+-- B switches it on (and holds now) or off (and lets go).
+function HOLD.auto()
+  if cfg.autoHold == nil then return AUTO_HOLD == true end
+  return cfg.autoHold
+end
+function HOLD.setAuto(on)
+  cfg.autoHold = on
+  saveConfig()
+  log("auto-hold %s", on and "on" or "off")
+  if on and not nav then HOLD.toggle()
+  elseif not on and nav and nav.mode == "brake" then navStop("auto-hold off") end
+end
+
 local function navLoop()
   local stoppedSince = nil
   while true do
@@ -1385,11 +1401,24 @@ end
 -- high for armed, low for safe.
 function war.armLoop()
   local latched = false
+  local timer = os.startTimer(0.05)
   while true do
     local ev, code = os.pullEvent()
     local ak = keys[cfg.keys.arm]
-    if ev == "key" and code == ak and not latched and currentScreen ~= "Keybinds"
-        and currentScreen ~= "Typewriter test" and fromTypewriter(code) then
+    -- Polled too (20 times a second), so a press is never missed.
+    local press = false
+    if ev == "timer" and code == timer then
+      pollTypewriter()
+      if twHeld[ak] then press = true else latched = false end
+      timer = os.startTimer(0.05)
+    elseif ev == "key" and code == ak and fromTypewriter(code) then
+      press = true
+    end
+    if press and not cfg.armSeen then
+      cfg.armSeen = true
+      saveConfig()
+    end
+    if press and not latched and currentScreen ~= "Keybinds" and currentScreen ~= "Typewriter test" then
       latched = true
       local g = war.guns()
       if g then
@@ -1401,8 +1430,6 @@ function war.armLoop()
       else
         log("arm key pressed but Fire Control isn't running")
       end
-    elseif ev == "key_up" and code == ak then
-      latched = false
     end
   end
 end
@@ -1478,6 +1505,10 @@ function war.line()
     local firing = 0
     for _, m in ipairs(gs.mounts) do if m.state == "FIRE" or m.state == "FIRING" then firing = firing + 1 end end
     local t = gs.targets[1]
+    if not cfg.armSeen then
+      return { gs.armed and { C.bad, " GUNS ARMED" } or { C.dim, " Guns safe" },
+        { C.warn, string.format("  %s: bind it on the typewriter", (cfg.keys.arm or "f"):upper()) } }
+    end
     return { gs.armed and { C.bad, " GUNS ARMED" } or { C.dim, " Guns safe" },
       t and string.format("  %s %.0fm", t.kind:sub(1, 12), t.d) or { C.dim, "  no targets" },
       firing > 0 and { C.bad, string.format("  firing %d", firing) } or "" }
@@ -1524,7 +1555,7 @@ local function flyScreen()
         saveConfig()
         log("turning power -> %d", TURN_POWER)
       elseif c == "b" then
-        HOLD.toggle()
+        HOLD.setAuto(not HOLD.auto())
       elseif c == "x" then
         muteAlarm()
       elseif c == "m" then
@@ -1541,9 +1572,6 @@ local function flyScreen()
     elseif ev == "throttle_set" and type(a) == "number" then
       FORWARD_POWER = clamp(a, 0, 15)
       log("throttle -> %d (tapped)", FORWARD_POWER)
-    elseif ev == "key" and a == keys[cfg.keys.brake] and not latched[a] and fromTypewriter(a) then
-      latched[a] = now()
-      HOLD.toggle()
     elseif ev == "key" then
       local dir = (a == keys[cfg.keys.faster] and 1) or (a == keys[cfg.keys.slower] and -1) or 0
       if dir ~= 0 and not latched[a] then
@@ -1605,6 +1633,23 @@ local function flyScreen()
         or down("sleft") or down("sright")
       if nav and manual then navStop("manual control") course = yaw end
       if landing and manual then landing = false log("landing cancelled by hand") end
+      -- B on the typewriter (polled, once per press): auto-hold on/off.
+      if down("brake") then
+        if not HOLD.bDown then HOLD.bDown = true HOLD.setAuto(not HOLD.auto()) end
+      else
+        HOLD.bDown = false
+      end
+      -- Auto-hold: no movement key for AUTO_HOLD_DELAY seconds -> Stop & hold.
+      if HOLD.auto() and not manual and not nav and not landing and lift.mode == "fly" and HOLD.ready() then
+        HOLD.idle = HOLD.idle or t
+        if t - HOLD.idle >= AUTO_HOLD_DELAY then
+          HOLD.idle = nil
+          HOLD.toggle()
+          log("auto-hold: no keys held")
+        end
+      else
+        HOLD.idle = nil
+      end
 
       if cfg.smartOn and smartReady() and not nav then
         -- Heading lock. A/D turn the lock itself at SMART_TURN_RATE and the
@@ -1768,7 +1813,7 @@ local function flyScreen()
         for i = 1, math.min(#msgs, 6) do out(table.unpack(msgs[i])) end
         local items = { { "Q", "Menu", { char = "q" } }, { "-", "", { char = "-" } }, { "+", "", { char = "+" } },
           { "M", cfg.smartOn and "Smart ON" or "Smart off", { char = "m" } },
-          { "B", nav and nav.mode == "brake" and "HOLDING" or "Hold", { char = "b" } } }
+          { "B", HOLD.auto() and "Auto-hold ON" or "Auto-hold off", { char = "b" } } }
         if fuelAlarm and not alarmMuted then items[#items + 1] = { "X", "Mute alarm", { char = "x" } } end
         footer(items)
       end
